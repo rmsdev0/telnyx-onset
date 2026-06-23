@@ -6,6 +6,10 @@ TTS over Telnyx WebSocket services, and **frame-level barge-in**. The entire loo
 (voice transport, STT, TTS, LLM inference, and call control) runs through one
 Telnyx control plane and one API key.
 
+Status: validated end to end on a real inbound call in the default half-duplex
+(turn-based) config; frame-level barge-in ships opt-in behind an echo gate (see
+below).
+
 Identity: one control plane, one API key, one vendor relationship. Not "every
 model is Telnyx-built." The TTS voice (`Telnyx.NaturalHD.*`) is a first-party
 Telnyx engine, while STT runs Deepgram via Telnyx's single API (a third-party
@@ -35,6 +39,11 @@ frames and, while the agent is speaking, flushes the outbound queue with `clear`
 and cancels the in-flight LLM and TTS. No network round trip, so it interrupts
 perceptibly faster than the Call Control `playback_stop` path.
 
+The default config is **half-duplex** (`HALF_DUPLEX=true`): the agent stops
+listening while it speaks so it cannot interrupt itself through line or acoustic
+echo, which gives clean turn-taking on a real phone. Set `HALF_DUPLEX=false` to
+enable the frame-level barge-in above once the audio path is confirmed echo-free.
+
 Audio is L16 / 16 kHz end to end, so nothing is resampled in app code; the only
 transcode in the loop is decoding the TTS socket's MP3.
 
@@ -62,22 +71,32 @@ development).
 The server answers inbound calls, issues `streaming_start`, and runs the loop
 when Telnyx connects the media socket.
 
-## Verify on a real call
+## Verified on a real call
 
-The automated suite and the live socket probe run with no phone. The full
-inbound-call verification needs a tunnel and a real call:
+The loop has been validated end to end on a real inbound PSTN call: the agent
+greets, the caller is transcribed via the STT socket, the LLM (Telnyx inference)
+responds, the Golden Fork reservation flow runs to completion (check
+availability, take the name, book, read back a confirmation number), TTS audio
+plays back to the caller through frame injection, relative dates resolve from the
+current date in the prompt, and the call tears down cleanly on hangup with the
+STT, media, and LLM sockets all closed and no orphaned tasks. This was in the
+default half-duplex config, so the conversation is turn-based; frame-level
+talk-over interruption is the opt-in full-duplex mode above and has not been
+validated on a live call.
+
+The automated suite and the live socket probe (`scripts/probe.py`, which
+confirmed the STT and TTS protocols against the real Telnyx API; see
+[DISCOVERY.md](DISCOVERY.md) Section 13) run with no phone. `scripts/probe.py` is
+a one-off diagnostic, not part of the agent.
+
+To reproduce on your own number:
 
 1. Start a tunnel to the local port (e.g. `ngrok http 8000`) and set
    `MEDIA_STREAM_URL=wss://<tunnel-host>/ws/media` and the Telnyx webhook to
    `https://<tunnel-host>/webhook`.
 2. Run the server and call the Telnyx number.
-3. Confirm: the agent greets, you are transcribed, the LLM responds, TTS audio
-   plays back, and talking over the agent interrupts it at the frame level. Hang
-   up and confirm clean teardown in the logs (no orphaned sockets, no warnings).
-
-`scripts/probe.py` is a one-off live diagnostic that confirmed the STT and TTS
-socket protocols against the real Telnyx API (findings recorded in DISCOVERY.md,
-Section 13). It is not part of the agent.
+3. You hear the greeting, book a table (give a date, time, party size, and name),
+   and the agent reads back a confirmation number, then hangs up cleanly.
 
 ## Quality
 
