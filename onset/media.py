@@ -196,12 +196,42 @@ class MediaStream:
             self.on_error()
 
     async def _pacer(self) -> None:
-        """Send one queued frame per frame_ms; marks pass through immediately."""
+        """Send one queued frame per frame_ms; marks pass through immediately.
+
+        Tracks pacer starvation per utterance as a debug near-underrun signal: a
+        starve is a frame period that entered with an empty queue and more audio
+        still to come (the producer fell behind real time), so Telnyx's buffer
+        could run dry. An empty queue right before the mark is the end of the
+        utterance (all audio sent, mark pending), not a gap, so it is not counted.
+        With a healthy playback prebuffer the queue is rarely empty at a frame
+        boundary, so this reads ~0; non-zero flags playing with little margin. The
+        tally is logged at the mark (media.pacer_starved).
+        """
+        starved = 0
+        prev_audio = False
+        awaiting_frame = False
+        utterance_epoch = -1
         while True:
+            if prev_audio and self._out.empty():
+                awaiting_frame = True
             epoch, kind, payload = await self._out.get()
             if epoch != self._epoch:
+                prev_audio = False
+                awaiting_frame = False
                 continue  # stale: belongs to a flushed utterance
+            if epoch != utterance_epoch:
+                # First item of a new utterance. If a barge-in flush happened while
+                # the pacer was blocked in get(), the stale-frame reset above was
+                # skipped, so clear any starvation state that leaked from the
+                # interrupted utterance rather than charge this one a phantom gap.
+                utterance_epoch = epoch
+                prev_audio = False
+                awaiting_frame = False
+                starved = 0
             if kind == _AUDIO:
+                if awaiting_frame:
+                    starved += 1  # queue ran dry and more audio was still coming
+                    awaiting_frame = False
                 encoded = encode_l16_payload(payload)
                 msg = json.dumps({"event": "media", "media": {"payload": encoded}})
                 try:
@@ -210,8 +240,17 @@ class MediaStream:
                     log.warning("media.send_failed", error=str(e))
                     self._fail()
                     return
+                prev_audio = True
                 await asyncio.sleep(self._frame_s)
             else:  # mark fence, sent after the preceding audio has drained
+                # An empty queue here is the utterance boundary, not a gap.
+                awaiting_frame = False
+                if prev_audio:
+                    log.debug(
+                        "media.pacer_starved", epoch=epoch, starved_frames=starved
+                    )
+                starved = 0
+                prev_audio = False
                 msg = json.dumps(
                     {"event": "mark", "mark": {"name": payload.decode("utf-8")}}
                 )

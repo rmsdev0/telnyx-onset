@@ -121,6 +121,30 @@ async def test_full_reservation_flow(settings: Settings) -> None:
 
 
 @pytest.mark.asyncio
+async def test_prebuffer_preserves_all_frames() -> None:
+    # Prebuffer smaller than the reply so both the prebuffer collection and the
+    # streaming remainder run; every synthesized frame must still reach the media
+    # queue exactly once (no drop or duplicate across the split).
+    settings = Settings(
+        telnyx_api_key="test-key",
+        telnyx_public_key="test-pub",
+        half_duplex=False,
+        tts_prebuffer_ms=20,  # 1 frame; FakeTts yields 2, so both loops run
+    )
+    h = make_harness(settings)
+    assert h.agent._prebuffer_frames == 1
+    h.agent.start()
+
+    await until(lambda: bool(h.tts.texts) and not h.agent._barge_in.agent_is_speaking)
+    assert len(h.media.frames) == 2  # both greeting frames injected
+
+    h.agent.submit_hangup()
+    await asyncio.wait_for(_run(h), timeout=2.0)
+    assert h.agent.run_task is not None
+    assert h.agent.run_task.exception() is None
+
+
+@pytest.mark.asyncio
 async def test_barge_in_flushes_outbound_while_speaking(settings: Settings) -> None:
     # The greeting does not auto-complete, so the agent stays speaking and the
     # caller can interrupt it.

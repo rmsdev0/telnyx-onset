@@ -7,6 +7,7 @@ import base64
 import json
 
 import pytest
+from structlog.testing import capture_logs
 
 from onset.media import (
     Connected,
@@ -95,6 +96,74 @@ async def test_pacer_injects_frames_and_mark() -> None:
     assert mark_msgs
     assert mark_msgs[0]["mark"]["name"] == "speak:1"  # type: ignore[index]
     await media.aclose()
+
+
+def _starve_counts(logs: list[dict[str, object]]) -> list[object]:
+    return [
+        e["starved_frames"] for e in logs if e.get("event") == "media.pacer_starved"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pacer_end_boundary_is_not_counted_as_starve() -> None:
+    # Draining all audio and then enqueuing the mark late empties the queue at the
+    # utterance boundary. That is not a playback gap, so it must not be counted.
+    ws = FakeWS()
+    media = MediaStream(ws, frame_ms=1, lead_frames=10)
+    with capture_logs() as logs:
+        media.start()
+        epoch = media.begin_utterance()
+        for _ in range(3):
+            await media.send_audio_frame(epoch, b"\x00\x00")
+        await asyncio.sleep(0.05)  # pacer drains all 3; queue empty, mark not yet sent
+        await media.send_mark(epoch, "speak:1")
+        await asyncio.sleep(0.02)  # pacer processes the mark and logs the tally
+        await media.aclose()
+    assert _starve_counts(logs) == [0]
+
+
+@pytest.mark.asyncio
+async def test_pacer_counts_a_real_midstream_starve() -> None:
+    # Audio that arrives after the queue has already run dry, with more audio still
+    # to come, is a real gap and must be counted.
+    ws = FakeWS()
+    media = MediaStream(ws, frame_ms=1, lead_frames=10)
+    with capture_logs() as logs:
+        media.start()
+        epoch = media.begin_utterance()
+        await media.send_audio_frame(epoch, b"\x00\x00")
+        await media.send_audio_frame(epoch, b"\x00\x00")
+        await asyncio.sleep(0.05)  # pacer drains both; queue empty, pacer waiting
+        await media.send_audio_frame(epoch, b"\x00\x00")  # late frame: one real starve
+        await asyncio.sleep(0.02)
+        await media.send_mark(epoch, "speak:1")
+        await asyncio.sleep(0.02)
+        await media.aclose()
+    assert _starve_counts(logs) == [1]
+
+
+@pytest.mark.asyncio
+async def test_pacer_new_utterance_not_charged_for_prior_interruption() -> None:
+    # A barge-in flush while the pacer is blocked waiting for more audio leaves it
+    # with stale "expecting a frame" state (it never sees the flushed frames). The
+    # next utterance's first frame must not be charged a phantom starve.
+    ws = FakeWS()
+    media = MediaStream(ws, frame_ms=1, lead_frames=10)
+    with capture_logs() as logs:
+        media.start()
+        epoch_a = media.begin_utterance()
+        await media.send_audio_frame(epoch_a, b"\x00\x00")
+        await asyncio.sleep(0.05)  # pacer sends A's frame, then waits (queue empty)
+        await media.flush()  # barge-in: bump epoch, drain
+        epoch_b = media.begin_utterance()
+        for _ in range(3):
+            await media.send_audio_frame(epoch_b, b"\x11\x11")  # backlog: no real gap
+        await asyncio.sleep(0.05)
+        await media.send_mark(epoch_b, "speak:2")
+        await asyncio.sleep(0.02)
+        await media.aclose()
+    # Only utterance B reaches a mark; it streamed cleanly, so its tally is 0.
+    assert _starve_counts(logs) == [0]
 
 
 @pytest.mark.asyncio

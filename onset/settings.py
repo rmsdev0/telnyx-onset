@@ -70,6 +70,18 @@ class Settings(BaseSettings):
     # TTS WebSocket. NaturalHD is a first-party Telnyx voice tier. Output is MP3,
     # decoded to PCM16 at sample_rate for injection.
     tts_voice: str = "Telnyx.NaturalHD.astra"
+    # Decode the TTS MP3 incrementally as it streams off the socket (emit frames
+    # as chunks arrive) instead of buffering the whole reply before decoding.
+    # Cuts time-to-first-audio on long replies (offline gate validated the
+    # streamed decode matches the whole-buffer decode). Set false to fall back to
+    # the whole-buffer path.
+    tts_streaming_decode: bool = True
+    # Milliseconds of decoded audio to buffer before playback starts (streaming
+    # decode only). Telnyx sends the first MP3 chunk fast, then pauses ~450 ms
+    # before the rest streams; without a cushion the pacer starves for a few
+    # frames right after a reply begins. This absorbs that early gap into the
+    # first-audio latency instead of an audible stutter. 0 disables prebuffering.
+    tts_prebuffer_ms: int = 400
 
     # Barge-in VAD (WebRTC, stateless, no ONNX). aggressiveness 0-3.
     vad_aggressiveness: int = 2
