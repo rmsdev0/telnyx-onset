@@ -136,6 +136,11 @@ class VoiceAgent:
         self._mute_until = 0.0
         self._silence_frame = b"\x00" * settings.frame_bytes
 
+        # Frames of decoded audio to buffer before playback starts, so an early
+        # gap in the TTS delivery is absorbed pre-playback rather than starving
+        # the pacer mid-reply (see _speak).
+        self._prebuffer_frames = round(settings.tts_prebuffer_ms / settings.frame_ms)
+
         # The three sockets and the local VAD, injectable for tests.
         self._stt: SttPort = (
             stt
@@ -559,13 +564,34 @@ class VoiceAgent:
         t_speak = time.monotonic()
         epoch = self._media.begin_utterance()
         frames = 0
-        async for frame in self._tts.synthesize(text):
+
+        def inject_first_audio_log() -> None:
+            # Time to the first audio frame injected: synthesis, first decode, and
+            # the prebuffer fill. This is when the caller starts hearing the reply.
+            log.info(
+                "latency.first_audio",
+                ms=round((time.monotonic() - t_speak) * 1000),
+            )
+
+        gen = self._tts.synthesize(text)
+        # Prebuffer a cushion of decoded audio before playback starts. Telnyx sends
+        # the first MP3 chunk fast then pauses before the rest; collecting a few
+        # frames first absorbs that gap here instead of starving the pacer once the
+        # reply is already playing. A reply shorter than the cushion just fills it.
+        prebuffer: list[bytes] = []
+        if self._prebuffer_frames > 0:
+            async for frame in gen:
+                prebuffer.append(frame)
+                if len(prebuffer) >= self._prebuffer_frames:
+                    break
+        for frame in prebuffer:
             if frames == 0:
-                # Time to the first audio frame: TTS synthesis plus first decode.
-                log.info(
-                    "latency.first_audio",
-                    ms=round((time.monotonic() - t_speak) * 1000),
-                )
+                inject_first_audio_log()
+            await self._media.send_audio_frame(epoch, frame)
+            frames += 1
+        async for frame in gen:
+            if frames == 0:
+                inject_first_audio_log()
             await self._media.send_audio_frame(epoch, frame)
             frames += 1
         # All frames are now enqueued; record the turn as spoken. A barge-in that

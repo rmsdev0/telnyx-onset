@@ -6,3 +6,5 @@ __pycache__/
 !.env.example
 .idea/
 .DS_Store
+# Diagnostic audio dumps from scripts/validate_streaming_decode.py
+out_*.wav
