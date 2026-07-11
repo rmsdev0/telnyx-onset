@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import wave
 from array import array
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -870,6 +871,25 @@ def test_probe_route_capture_limit_is_named_and_terminal(
             )
             ws.receive_text()
         assert controller.failure == "capture_limit_reached"
+
+
+def test_live_preflight_checks_directory_form_of_anchored_artifact_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+
+    def record(command: list[str], *, check: bool, cwd: Path) -> Result:
+        commands.append(command)
+        return Result()
+
+    monkeypatch.setattr("bench.acoustic_probe.subprocess.run", record)
+    acoustic_probe._run_live_preflight()
+    ignore_command = commands[0]
+    assert ignore_command[:3] == ["git", "check-ignore", "-q"]
+    assert ignore_command[3] == f"{acoustic_probe.ARTIFACT_ROOT}{os.sep}"
 
 
 def test_completed_stimulus_task_failure_is_retrieved_and_named(

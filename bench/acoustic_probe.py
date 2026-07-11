@@ -1868,7 +1868,10 @@ def _live_config(arguments: argparse.Namespace) -> BenchConfig:
 def _run_live_preflight() -> None:
     """Refuse dialing unless ignore, tests, lint, and types are currently clean."""
     checks = (
-        (["git", "check-ignore", "-q", str(ARTIFACT_ROOT)], "artifact ignore rule"),
+        (
+            ["git", "check-ignore", "-q", f"{ARTIFACT_ROOT}{os.sep}"],
+            "artifact ignore rule",
+        ),
         ([sys.executable, "-m", "pytest", "-q"], "offline tests"),
         ([sys.executable, "-m", "ruff", "check", "onset/", "bench/", "tests/"], "Ruff"),
         ([sys.executable, "-m", "mypy", "onset/", "bench/", "tests/"], "mypy"),
