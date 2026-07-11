@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from typing import TYPE_CHECKING
 
 import pytest
 from structlog.testing import capture_logs
@@ -20,6 +21,9 @@ from onset.media import (
     Stop,
     decode,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
 
 
 class FakeWS:
@@ -98,7 +102,7 @@ async def test_pacer_injects_frames_and_mark() -> None:
     await media.aclose()
 
 
-def _starve_counts(logs: list[dict[str, object]]) -> list[object]:
+def _starve_counts(logs: Iterable[Mapping[str, object]]) -> list[object]:
     return [
         e["starved_frames"] for e in logs if e.get("event") == "media.pacer_starved"
     ]

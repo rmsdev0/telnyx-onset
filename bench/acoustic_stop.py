@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from array import array
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,111 @@ class DetectorAnalysis:
     windows: tuple[EnergyWindow, ...]
     result: AcousticStopResult | None
     malformed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class LabeledCalibrationSegment:
+    """A local synthetic/baseline segment excluded from benchmark results."""
+
+    label: str
+    kind: Literal["natural_pause", "forced_stop"]
+    pcm16: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationCandidate:
+    config: DetectorConfig | None
+    statistic: str
+    activity_threshold_dbfs: float
+    silence_threshold_dbfs: float
+    sustained_silence_ms: int
+    window_ms: int
+    segment: str
+    expected_stop: bool
+    detected_stop: bool
+    passed: bool
+    failure: str | None
+
+
+def evaluate_bounded_calibration(
+    segments: tuple[LabeledCalibrationSegment, ...],
+    *,
+    activity_thresholds_dbfs: tuple[float, ...],
+    silence_thresholds_dbfs: tuple[float, ...],
+    hold_step_ms: int = 100,
+    statistics: tuple[str, ...] = ("rms_dbfs",),
+    window_sizes_ms: tuple[int, ...] = (20,),
+) -> tuple[CalibrationCandidate, ...]:
+    """Evaluate every declared finite candidate without selecting a profile."""
+    if not segments:
+        raise ValueError("calibration segments are required")
+    if not activity_thresholds_dbfs or not silence_thresholds_dbfs:
+        raise ValueError("finite threshold sets are required")
+    if not statistics or not window_sizes_ms:
+        raise ValueError("finite statistic and window sets are required")
+    if hold_step_ms <= 0 or 900 % hold_step_ms:
+        raise ValueError("hold step must include both 100 and 1000 ms endpoints")
+    holds = tuple(range(100, 1_001, hold_step_ms))
+    records: list[CalibrationCandidate] = []
+    for statistic in statistics:
+        for window_ms in window_sizes_ms:
+            for activity in activity_thresholds_dbfs:
+                for silence in silence_thresholds_dbfs:
+                    for hold in holds:
+                        invalid: str | None = None
+                        if statistic != "rms_dbfs":
+                            invalid = "unsupported_statistic"
+                        elif window_ms <= 0:
+                            invalid = "invalid_window"
+                        elif activity < silence:
+                            invalid = "invalid_threshold_order"
+                        config = (
+                            None
+                            if invalid
+                            else DetectorConfig(
+                                window_ms=window_ms,
+                                activity_threshold_dbfs=activity,
+                                silence_threshold_dbfs=silence,
+                                sustained_silence_ms=hold,
+                            )
+                        )
+                        for segment in segments:
+                            detected = (
+                                False
+                                if config is None
+                                else analyze_acoustic_stop(segment.pcm16, config).result
+                                is not None
+                            )
+                            expected = segment.kind == "forced_stop"
+                            passed = invalid is None and detected is expected
+                            records.append(
+                                CalibrationCandidate(
+                                    config=config,
+                                    statistic=statistic,
+                                    activity_threshold_dbfs=activity,
+                                    silence_threshold_dbfs=silence,
+                                    sustained_silence_ms=hold,
+                                    window_ms=window_ms,
+                                    segment=segment.label,
+                                    expected_stop=expected,
+                                    detected_stop=detected,
+                                    passed=passed,
+                                    failure=invalid
+                                    if invalid
+                                    else (
+                                        None
+                                        if passed
+                                        else (
+                                            "natural_pause_false_stop"
+                                            if detected
+                                            else "forced_stop_missed"
+                                        )
+                                    ),
+                                )
+                            )
+    if not records:
+        raise ValueError("no valid detector candidates")
+    return tuple(records)
 
 
 def _pcm16_samples(pcm16: bytes) -> array[int]:

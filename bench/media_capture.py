@@ -42,6 +42,7 @@ class StreamAuthorization:
     token: str
     run_id: str
     call_control_id: str
+    role: Literal["probe", "agent"]
     expires_ns: int
 
 
@@ -54,25 +55,39 @@ class StreamTokenStore:
         self._maximum = maximum
         self._pending: list[StreamAuthorization] = []
 
-    def issue(self, run_id: str, call_control_id: str, now_ns: int) -> str:
+    def issue(
+        self,
+        run_id: str,
+        call_control_id: str,
+        role: Literal["probe", "agent"],
+        now_ns: int,
+    ) -> str:
         self.remove_expired(now_ns)
         if len(self._pending) >= self._maximum:
             raise ProbeProtocolError("stream_auth_capacity")
         token = secrets.token_urlsafe(32)
         self._pending.append(
-            StreamAuthorization(token, run_id, call_control_id, now_ns + TOKEN_TTL_NS)
+            StreamAuthorization(
+                token, run_id, call_control_id, role, now_ns + TOKEN_TTL_NS
+            )
         )
         return token
 
     def consume(
-        self, presented: str, *, run_id: str, now_ns: int
+        self,
+        presented: str,
+        *,
+        run_id: str,
+        role: Literal["probe", "agent"],
+        now_ns: int,
     ) -> StreamAuthorization:
         self.remove_expired(now_ns)
         match_index: int | None = None
         for index, authorization in enumerate(self._pending):
             token_matches = hmac.compare_digest(authorization.token, presented)
             run_matches = hmac.compare_digest(authorization.run_id, run_id)
-            if token_matches and run_matches:
+            role_matches = hmac.compare_digest(authorization.role, role)
+            if token_matches and run_matches and role_matches:
                 match_index = index
         if match_index is None:
             raise ProbeProtocolError("stream_auth_failed")
@@ -129,6 +144,7 @@ class MarkFrame:
 
 @dataclass(frozen=True, slots=True)
 class ErrorFrame:
+    sequence_number: int | None
     code: int | None
     title: str
     host_receive_monotonic_ns: int
@@ -259,6 +275,9 @@ def decode_probe_message(raw: str, host_receive_monotonic_ns: int) -> ProbeFrame
     if event == "error":
         payload = _object(data.get("payload"), "malformed_error")
         return ErrorFrame(
+            sequence_number=_integer(
+                data.get("sequence_number"), "bad_sequence", optional=True
+            ),
             code=_integer(payload.get("code"), "bad_error_code", optional=True),
             title=str(payload.get("title", "unknown"))[:128],
             host_receive_monotonic_ns=host_receive_monotonic_ns,
@@ -315,7 +334,7 @@ class OrderingCounts:
 
 
 class OrderingTracker:
-    """Arrival-order integrity tracker with independent state per track."""
+    """Global frame sequencing plus track-local media integrity."""
 
     def __init__(self) -> None:
         self.counts = OrderingCounts()
@@ -323,20 +342,30 @@ class OrderingTracker:
         self._last_sequence: int | None = None
         self._seen: set[tuple[str, int, int, int]] = set()
 
-    def observe(self, frame: MediaFrame) -> None:
-        identity = (frame.track, frame.sequence_number, frame.chunk, frame.timestamp)
-        if identity in self._seen:
-            self.counts.duplicates += 1
+    def observe_frame(self, frame: ProbeFrame) -> None:
+        if isinstance(frame, MediaFrame):
+            identity = (
+                frame.track,
+                frame.sequence_number,
+                frame.chunk,
+                frame.timestamp,
+            )
+            if identity in self._seen:
+                self.counts.duplicates += 1
+                return
+            self._seen.add(identity)
+        sequence = getattr(frame, "sequence_number", None)
+        if sequence is not None:
+            if self._last_sequence is not None:
+                if sequence == self._last_sequence:
+                    self.counts.duplicates += 1
+                elif sequence < self._last_sequence:
+                    self.counts.sequence_regressions += 1
+                elif sequence > self._last_sequence + 1:
+                    self.counts.sequence_gaps += sequence - self._last_sequence - 1
+            self._last_sequence = sequence
+        if not isinstance(frame, MediaFrame):
             return
-        self._seen.add(identity)
-        if self._last_sequence is not None:
-            if frame.sequence_number < self._last_sequence:
-                self.counts.sequence_regressions += 1
-            elif frame.sequence_number > self._last_sequence + 1:
-                self.counts.sequence_gaps += (
-                    frame.sequence_number - self._last_sequence - 1
-                )
-        self._last_sequence = frame.sequence_number
         previous = self._last.get(frame.track)
         if previous is not None:
             _, chunk, timestamp = previous
@@ -385,7 +414,13 @@ class BoundedCapture:
             raise CaptureLimitError("capture_limit_reached")
         target.extend(frame.pcm16)
         self.frames.append(frame)
-        self.ordering.observe(frame)
+        self.ordering.observe_frame(frame)
+
+    def observe_non_media(self, frame: ProbeFrame) -> None:
+        """Account for lifecycle sequence numbers without altering PCM."""
+        if isinstance(frame, MediaFrame):
+            raise ValueError("media frames must be appended")
+        self.ordering.observe_frame(frame)
 
 
 def new_run_id() -> str:

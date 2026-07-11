@@ -7,7 +7,12 @@ from array import array
 
 import pytest
 
-from bench.acoustic_stop import DetectorConfig, analyze_acoustic_stop
+from bench.acoustic_stop import (
+    DetectorConfig,
+    LabeledCalibrationSegment,
+    analyze_acoustic_stop,
+    evaluate_bounded_calibration,
+)
 
 
 def pcm(*segments: tuple[int, int]) -> bytes:
@@ -143,3 +148,45 @@ def test_unsupported_detector_configuration_is_rejected(
 ) -> None:
     with pytest.raises(ValueError):
         DetectorConfig(**kwargs)
+
+
+def test_bounded_calibration_records_every_candidate_without_selecting() -> None:
+    segments = (
+        LabeledCalibrationSegment(
+            "pause", "natural_pause", pcm((8_000, 200), (0, 100), (8_000, 200))
+        ),
+        LabeledCalibrationSegment(
+            "forced", "forced_stop", pcm((8_000, 200), (0, 1_000))
+        ),
+    )
+    records = evaluate_bounded_calibration(
+        segments,
+        activity_thresholds_dbfs=(-38.0,),
+        silence_thresholds_dbfs=(-45.0,),
+        hold_step_ms=100,
+    )
+    assert len(records) == 20
+    assert {record.sustained_silence_ms for record in records} == set(
+        range(100, 1_001, 100)
+    )
+    assert any(record.failure == "natural_pause_false_stop" for record in records)
+    assert not hasattr(records, "selected_profile")
+
+
+def test_bounded_calibration_records_invalid_declared_candidates() -> None:
+    segment = LabeledCalibrationSegment(
+        "forced", "forced_stop", pcm((8_000, 200), (0, 1_000))
+    )
+    records = evaluate_bounded_calibration(
+        (segment,),
+        activity_thresholds_dbfs=(-50.0,),
+        silence_thresholds_dbfs=(-45.0,),
+        statistics=("rms_dbfs", "unsupported"),
+        window_sizes_ms=(20, 0),
+    )
+    assert {record.failure for record in records} >= {
+        "invalid_threshold_order",
+        "invalid_window",
+        "unsupported_statistic",
+    }
+    assert all(not record.passed for record in records)

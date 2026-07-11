@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncGenerator, Iterator
 
 from onset.settings import Settings
 from onset.tts import TtsClient
@@ -56,9 +56,7 @@ async def test_synthesize_sends_text_and_yields_frames(
     monkeypatch.setattr("onset.tts.ws_connect", fake_connect)
     # Avoid a real MP3 decode: return three frames' worth of PCM (frame_bytes=640).
     fake_pcm = b"\x00" * (640 * 3)
-    monkeypatch.setattr(
-        "onset.tts.decode_mp3_to_pcm16", lambda mp3, rate: fake_pcm
-    )
+    monkeypatch.setattr("onset.tts.decode_mp3_to_pcm16", lambda mp3, rate: fake_pcm)
 
     # This exercises the whole-buffer path specifically.
     client = TtsClient(_settings(tts_streaming_decode=False))
@@ -147,7 +145,7 @@ async def test_streaming_synthesize_closes_socket_on_aclose(
     monkeypatch.setattr("onset.tts.stream_mp3_frames", _fake_stream_mp3_frames)
 
     client = TtsClient(_settings(tts_streaming_decode=True))
-    agen = client.synthesize("hello")
+    agen = cast("AsyncGenerator[bytes, None]", client.synthesize("hello"))
     first = await agen.__anext__()
     assert len(first) == 640
     await agen.aclose()

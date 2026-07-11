@@ -54,32 +54,34 @@ def media_raw(
 
 def test_one_use_token_validates_run_and_expires() -> None:
     store = StreamTokenStore(maximum=2)
-    token = store.issue("run-one", "call-one", 10)
-    authorization = store.consume(token, run_id="run-one", now_ns=11)
+    token = store.issue("run-one", "call-one", "probe", 10)
+    authorization = store.consume(token, run_id="run-one", role="probe", now_ns=11)
     assert authorization.call_control_id == "call-one"
     assert store.pending == 0
     with pytest.raises(ProbeProtocolError, match="stream_auth_failed"):
-        store.consume(token, run_id="run-one", now_ns=12)
+        store.consume(token, run_id="run-one", role="probe", now_ns=12)
 
-    expired = store.issue("run-one", "call-two", 20)
+    expired = store.issue("run-one", "call-two", "probe", 20)
     with pytest.raises(ProbeProtocolError, match="stream_auth_failed"):
-        store.consume(expired, run_id="run-one", now_ns=60_000_000_021)
+        store.consume(expired, run_id="run-one", role="probe", now_ns=60_000_000_021)
 
 
 def test_token_wrong_run_missing_and_bounded_store() -> None:
     store = StreamTokenStore(maximum=1)
-    token = store.issue("run-one", "call-one", 0)
+    token = store.issue("run-one", "call-one", "probe", 0)
     with pytest.raises(ProbeProtocolError, match="stream_auth_failed"):
-        store.consume(token, run_id="run-two", now_ns=1)
+        store.consume(token, run_id="run-two", role="probe", now_ns=1)
+    with pytest.raises(ProbeProtocolError, match="stream_auth_failed"):
+        store.consume(token, run_id="run-one", role="agent", now_ns=1)
     with pytest.raises(ProbeProtocolError, match="stream_auth_capacity"):
-        store.issue("run-one", "call-two", 2)
+        store.issue("run-one", "call-two", "probe", 2)
     with pytest.raises(ProbeProtocolError, match="stream_auth_failed"):
-        store.consume("", run_id="run-one", now_ns=3)
+        store.consume("", run_id="run-one", role="probe", now_ns=3)
 
 
 def test_token_is_not_present_in_serialized_safe_state() -> None:
     store = StreamTokenStore()
-    token = store.issue("run-one", "call-one", 0)
+    token = store.issue("run-one", "call-one", "probe", 0)
     safe = json.dumps({"pending_tokens": store.pending, "run": "run-one"})
     assert token not in safe
 
@@ -155,6 +157,7 @@ def test_mark_error_and_stop_frames_are_safe_and_structured() -> None:
     stop = decode_probe_message('{"event":"stop","sequence_number":"4"}', 3)
     assert isinstance(mark, MarkFrame) and mark.name == "done"
     assert isinstance(error, ErrorFrame) and asdict(error) == {
+        "sequence_number": None,
         "code": 100004,
         "title": "invalid_media",
         "host_receive_monotonic_ns": 2,
@@ -271,3 +274,22 @@ def test_artifact_paths_are_internal_and_private(
     assert os.stat(manifest).st_mode & 0o777 == 0o600
     with pytest.raises(ValueError, match="unsafe"):
         artifacts.write_json("../escape.json", {})
+
+
+def test_global_sequence_accepts_media_mark_dtmf_and_media_interleaving() -> None:
+    capture = BoundedCapture(max_bytes_per_track=10_000, max_event_rows=20)
+    first = decode_probe_message(media_raw(sequence=1, chunk=1, timestamp=20), 1)
+    mark = decode_probe_message(
+        '{"event":"mark","sequence_number":"2","mark":{"name":"queued"}}',
+        2,
+    )
+    dtmf = decode_probe_message(
+        '{"event":"dtmf","sequence_number":"3","dtmf":{"digit":"5"}}', 3
+    )
+    second = decode_probe_message(media_raw(sequence=4, chunk=2, timestamp=40), 4)
+    assert isinstance(first, MediaFrame) and isinstance(second, MediaFrame)
+    capture.append(first)
+    capture.observe_non_media(mark)
+    capture.observe_non_media(dtmf)
+    capture.append(second)
+    assert not capture.ordering.unresolved

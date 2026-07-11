@@ -4,246 +4,201 @@
 
 **CONDITIONAL GO**
 
-The isolated implementation and offline validation pass. The empirical Phase 2
-gate is not complete because no live probe was authorized or run: the required
-`--live` invocation was absent and the `BENCH_LIVE`, trusted-number, and public
-WSS configuration gates were not present. This report contains no comparative
-latency result.
+The offline remediation is implemented and tested. This is not empirical GO.
+No live probe, call, tunnel, manual waveform review, or detector calibration was
+run. Phase 3 remains blocked until a separately authorized live validation and
+independent review satisfy every remaining gate below.
 
-## Repository state
+## Repository and scope
 
-- Implementation base: `5b8da341e0db3d279b5767311cedf870a977f249`
+- Remediation base: `b861afdfe22201474a018a778803d9451d5c6c14`
 - Branch: `duplex`
-- Phase 1 pre-registration: committed and unchanged
-- Working tree: dirty only with the uncommitted Phase 2 files listed below
+- Methodology authority: `BENCHMARK_PLAN.md`, unchanged
 - Production runtime modules modified: none
+- `bench/measurement_profile.json`: absent by design
+- Comparative benchmark results: none
 
-## Objective
+The probe remains a separate bench-only FastAPI application. Production
+`onset.server` dispatch and normal VoiceAgent behavior are unchanged. The bench
+agent route constructs the normal VoiceAgent only for leg B; the probe route on
+leg A performs capture and injection only.
 
-Prove or disprove that one controlled harness process can emit a known local
-synthetic caller fixture and capture returned agent audio on one host monotonic
-clock, with stable track separation, bounded timing uncertainty, and no
-material fixture contamination on the selected agent track.
+## Repaired measurement workflow
 
-## Implemented topology
+The socket handler may finish only as
+`CAPTURE_COMPLETE_PENDING_REVIEW`, `CONDITIONAL GO`, or `NO-GO`. It never writes
+`GO` and never freezes a measurement profile. Promotion requires all of:
 
-`bench.acoustic_probe` is a separate FastAPI application and entrypoint. During
-an explicitly gated live run it:
+1. a separately authorized bounded live attempt;
+2. manual agreement between waveform and derived energy evidence;
+3. completion of the finite, condition-independent detector calibration;
+4. an independent review of the code and sanitized live evidence.
 
-1. Dials the configured agent number from the configured harness number.
-2. Owns the returned outbound call-control ID as leg A, in memory only.
-3. Accepts one matching incoming call as leg B and answers it.
-4. Starts an authenticated `both_tracks`, bidirectional L16/16 kHz RTP stream on
-   leg A with an explicitly selected `self` or `opposite` target.
-5. Starts the normal production media path and an unmodified `VoiceAgent` on
-   leg B through the bench app's separate agent WebSocket route.
-6. Bridges the legs after both are answered.
-7. Captures the agent greeting and natural stop before pacing the fixture.
-8. Requires a post-stimulus agent response and stop.
-9. Explicitly attempts to hang up both legs in all teardown paths.
+Send completion is retained only as pacing diagnostics. A returned mark is
+retained only as supporting provider queue evidence. Neither defines an
+acoustic endpoint.
 
-The production `onset.server` dispatch and production decoder were not changed.
+## Window and track rules
 
-## Files and commands
+Track names are not interpreted as direction. Both stable labels must cover a
+common interval before selection. The probe evaluates them jointly:
 
-Implemented files:
+- Window A: agent-only greeting;
+- Window B: post-greeting silence/noise floor;
+- Window C: verified returned fixture plus separating silence;
+- Window D: genuinely new post-stimulus agent response.
 
-- `.gitignore`
-- `bench/__init__.py`
-- `bench/acoustic_probe.py`
-- `bench/media_capture.py`
-- `bench/acoustic_stop.py`
-- `bench/PHASE2_REPORT.md`
-- `tests/test_bench_acoustic_probe.py`
-- `tests/test_bench_media_capture.py`
-- `tests/test_bench_acoustic_stop.py`
+The greeting track is not selected when it completes a detector window first.
+Both tracks are truncated to their common completed diagnostic interval for the
+joint decision. One and only one track must carry the greeting and later
+response. One and only one other track must match the known fixture.
 
-Validation commands:
+Fixture correspondence uses an explicit, deterministic 20 ms energy-envelope
+correlation over unchanged mono PCM16/16 kHz samples. Alignment is searched only
+over the finite 0–2000 ms range; media is not resampled, reordered, gap-filled,
+or silently reconstructed. The post-stimulus boundary opens only after the
+matched returned fixture ends and 100 ms of separating silence is observed on
+both tracks. Window D must contain new activity on the selected agent track and
+no mirrored active response on the selected stimulus track.
+Delayed provider-queued fixture audio therefore moves the boundary rather than
+becoming a response.
 
-```text
-.venv/bin/pytest -q
-.venv/bin/ruff check onset/ bench/ tests/
-.venv/bin/mypy bench/ tests/test_bench_*.py
-.venv/bin/mypy onset/ bench/ tests/
-git diff --check
-git check-ignore -v bench/artifacts/
-```
+Named NO-GO outcomes include `fixture_match_missing`,
+`fixture_match_ambiguous`, `stimulus_overlap`,
+`stimulus_boundary_ambiguous`, `track_ambiguous`, and
+`post_stimulus_response_not_observed`.
 
-## Authentication and webhook safety
+For every track and A–D window, derived evidence reports active-frame count,
+frame count, RMS dBFS, noise-floor estimate, peak absolute level, clipping
+count, and global/track-local gap, regression, and duplicate counts.
 
-- Stream tokens use 32 random bytes, are scoped to run and call-control ID,
-  expire after 60 monotonic seconds, are one-use, and live in a bounded store.
-- Comparisons use `hmac.compare_digest`.
-- Tokens are accepted only from the documented WebSocket header or connected
-  frame field.
-- The token is sent using `stream_auth_token`, never in the stream URL.
-- Capture allocation occurs only after authentication.
-- The start-frame call-control ID must match the authorization.
-- Webhooks retain Ed25519 verification and a 256 KiB body ceiling.
-- Duplicate webhook IDs are acknowledged without repeating side effects.
-- Raw bodies, phone numbers, provider IDs, tokens, and transcripts are not
-  written to artifacts.
+## Readiness and authentication
 
-## Fixture
+The controller owns a bridge-ready event. A probe socket may authenticate and
+validate its start and media format, but Window A capture and stimulus emission
+wait for `call.bridged`. The wait uses the existing state timeout. Failure is
+`bridge_failed`, followed by bounded teardown of both identified legs.
 
-The live fixture loader requires mono, uncompressed PCM16 WAV at 16 kHz, at
-most 1 MiB and 10 seconds. It records the container SHA-256, never the source
-path. It finds the first sample whose absolute PCM16 value reaches the declared
-threshold and records its sample/frame offset. All-silence input is rejected.
+Only one probe socket can be active. Header and connected-frame authentication
+are preserved. When the header is absent, connected-frame receipt and token
+consumption are covered by a short explicit timeout. Capture state is allocated
+only after successful authentication. Tokens remain random, one-use,
+monotonic-expiring, run-bound, call-bound, route/role-bound, and constant-time
+compared. A probe/leg-A token cannot authenticate the VoiceAgent route.
 
-No live fixture was supplied, so this report has no live fixture hash.
+Offline FastAPI/WebSocket tests cover stalled and missing authentication,
+expired/mismatched/reused tokens, one active socket, call-ID and format
+mismatch, bridge readiness, socket errors, and both-leg teardown. No provider
+is contacted.
 
-## Media format
+## Fixture and capture integrity
 
-Requested live format: L16, 16 kHz, mono, 20 ms frames; leg A requests
-`both_tracks`. The decoder rejects mismatched codec, rate, or channels and does
-not resample or coerce them.
+The fixture loader rejects symlinks and non-regular files. It checks the stat
+size before opening, performs one bounded read of at most the limit plus one
+byte, and compares file identity and size before and after the read. Growth or
+replacement fails closed. WAV/PCM16/mono/16 kHz/duration/hash/all-silence checks
+remain. The original path is never persisted. An offline oversized-file test
+proves rejection occurs before payload reading.
 
-Observed live format: not available because no call ran.
+Global sequence continuity is updated for every lifecycle frame carrying a
+sequence number, including start, media, mark, DTMF, error, and stop. Chunk and
+media timestamp state remain track-specific. Arrival order remains primary;
+real gaps, regressions, duplicates, and timestamp anomalies remain NO-GO. Tests
+cover legal media → mark/DTMF → media interleavings.
 
-## Track mapping and contamination
+Raw JSONL remains append-only. A failed attempt rewrites only the derived
+manifest with a named category, sanitized terminal outcome, attempt number, and
+teardown result. Tokens, phone numbers, provider IDs, transcripts, raw error
+bodies, and authorization values are excluded.
 
-Track labels are never hardcoded as agent or stimulus. The planned mapping uses
-an agent-only greeting, confirmed natural silence, stimulus-only playback, and
-post-stimulus response window. Exactly one track must contain the greeting and
-natural stop; both tracks must be present and stable.
+The live artifact root is anchored to the module repository at
+`bench/artifacts`, must resolve under the repository's `bench` directory, and
+must match the exact path verified by live preflight. Symlinks and path escapes
+are rejected. Run IDs remain generated; directories/files remain 0700/0600.
 
-The stimulus-only check records agent/stimulus mean-square energy ratio and
-zero-lag absolute waveform correlation. Candidate limits are an energy ratio of
-at most 0.10 and absolute correlation of at most 0.80. These are Phase 2
-diagnostic candidates, not a frozen Phase 3 measurement profile. Mixed tracks
-fail offline tests. No live track mapping or contamination finding exists yet.
+## Bounded detector calibration support
 
-## Pacing
+The offline helper evaluates declared finite statistic, analysis-window, and
+activity/silence threshold sets, plus every sustained-silence hold from
+100–1000 ms at a declared fixed step. The currently supported statistic is RMS
+dBFS; unsupported declared statistics, invalid windows, and invalid threshold
+orders are retained as named candidate failures rather than silently skipped.
+It evaluates labeled natural-pause and forced-stop segments and records every
+candidate, pass, and named failure. It does not select or persist a profile.
+Calibration inputs and derived evidence remain local ignored artifacts, and an
+independent review is required before any later profile freeze.
 
-PCM is split into 320-sample/640-byte frames. Only the final frame may be
-zero-padded. Deadlines use:
+## Offline validation status
 
-```text
-deadline_n = origin_monotonic_ns + n * 20 ms
-```
+The remediation test suite includes adversarial delayed-fixture and one-frame
+track-skew cases. Similar waveforms on both tracks are ambiguous, not
+first-completer wins. The full exact command results are recorded in the task
+handoff that accompanies this report revision.
 
-Each frame records deadline, send-start, send-complete, lateness, and byte
-count. A live run fails if any frame exceeds the predeclared 10 ms scheduling
-tolerance. Fake-clock tests confirm absolute deadlines, padding, diagnostics,
-and cancellation behavior. No live pacing values exist yet.
+Minimal type-only corrections were made in `tests/test_media.py` and
+`tests/test_tts.py`: collection variance was expressed with iterable/mapping
+interfaces, and an async generator was narrowed for its existing `aclose`
+assertion. Runtime code, assertions, and mypy configuration were not changed.
 
-## Ordering and capture integrity
+## Independent remediation review
 
-The strict decoder retains arrival time, sequence, track, chunk, timestamp, and
-decoded PCM while keeping provider identifiers in memory. Ordering state is
-independent by track and records duplicates, sequence regressions, chunk gaps,
-chunk regressions, and timestamp regressions. Any unresolved anomaly prevents a
-GO. Primary timing uses arrival order; no silent reconstruction is performed.
+An independent offline code review was completed on 2026-07-10 and persisted
+here. Its initial pass found route-interchangeable tokens, one-track boundary
+silence, incomplete stimulus-task failure retrieval, incomplete calibration
+candidate accounting, and a one-frame Window D completion skew. Each issue was
+corrected and covered by adversarial tests. The final re-review verdict was
+**COMPLETE for the requested offline remediation**, with no remaining
+correctness, security, privacy, or async-lifecycle blocker found.
 
-Offline ordered/anomalous cases pass. No live ordering finding exists yet.
+This review is not the later independent review of live waveform, calibration,
+and track-separation evidence. It does not promote Phase 2 to empirical GO.
 
-## Detector validation
+## Manual review procedure
 
-The pure detector uses RMS dBFS over exact PCM16 windows. It requires prior
-continuous activity, tolerates pauses shorter than the sustained-silence hold,
-confirms the complete hold, and backdates the result to the first silent window.
-It reports window resolution and clipping and rejects odd-byte PCM.
+After a separately authorized live run, inspect only its ignored local run
+directory:
 
-Offline cases passing include all silence, continuous activity, active-to-stop,
-short and multiple natural pauses, abrupt cut, fade-out, low noise, noise above
-threshold, exact hold boundary, partial final window, clipping, minimum signed
-PCM, malformed input, and absent prior activity.
+1. compare both waveforms across Windows A–D;
+2. compare visible fixture end and response onset with energy and detector
+   summaries;
+3. confirm the fixture correlation and bounded alignment are credible;
+4. confirm separating silence and absence of fixture overlap on the agent track;
+5. confirm new agent activity begins only after the boundary;
+6. record sanitized agreement or disagreement and obtain independent review.
 
-Live natural-stop validation: not run. Offline abrupt-stop validation: passed.
-Live abrupt-stop validation is deferred because Phase 2 does not modify
-VoiceAgent, enable unsafe full duplex, or use transcript-race behavior.
-
-## Manual spot-check procedure
-
-After a bounded live run, inspect only the ignored local run directory:
-
-1. Compare `agent_track.wav` and `stimulus_track.wav` across greeting,
-   silence, stimulus, and response windows.
-2. Compare the visible boundary with `energy_by_frame.csv` and
-   `detector_summary.json`.
-3. Confirm the selected agent track is quiet during stimulus-only playback and
-   newly active afterward.
-4. Confirm no unexplained discontinuity aligns with either detected stop.
-5. Record agreement or disagreement in a sanitized revision of this report.
-
-The manual check is waveform agreement validation, not human-perception
-measurement.
-
-## Resolution and uncertainty
-
-The candidate stop has detector-window resolution and retains the receive time
-of its containing frame. Stimulus onset is bounded by first-frame send-start,
-send-complete, and the known first-active sample offset. Reportable uncertainty
-includes one 20 ms frame, send duration, scheduling lateness, receive batching,
-within-frame offset, and ordering anomalies. Provider timestamps are integrity
-metadata and are never subtracted from host monotonic timestamps.
-
-## Security and privacy checks
-
-- `bench/artifacts/` is narrowly ignored; the rule was verified with
-  `git check-ignore`.
-- Run IDs and artifact filenames are internally generated and path-checked.
-- Run directories use mode `0700`; files use `0600`.
-- Capture is bounded to 4 MiB per track and 20,000 frame rows.
-- Calls and captures are capped at 60 seconds, with named state timeouts.
-- The code permits at most three configured attempts and one controller/run.
-- Live execution requires both `--live` and `BENCH_LIVE=1`.
-- Live configuration is rejected unless the existing safe half-duplex
-  listening policy remains enabled.
-- The live CLI reruns ignore verification, pytest, Ruff, and mypy before
-  starting the server or dialing.
-- No live audio, JSONL, tokens, numbers, or provider IDs were created.
-
-## Offline check results
-
-- `pytest`: **108 passed**, one third-party Starlette deprecation warning.
-- Phase 2 tests: **47 passed**.
-- Ruff across `onset/`, `bench/`, and `tests/`: **passed**.
-- Strict mypy for all new Phase 2 modules/tests: **passed**.
-- Repository-wide mypy: four unchanged pre-existing errors in
-  `tests/test_media.py` and `tests/test_tts.py`; neither file was modified.
-- `git diff --check`: **passed**.
-- Artifact ignore verification: **passed**.
+This is waveform agreement validation, not a human-perception measurement.
 
 ## Remaining live unknowns
 
-- Actual `self`/`opposite` behavior on this bridged topology.
-- Actual track-to-leg orientation.
-- Stability and separation of both tracks.
-- Actual negotiated media format and frame characteristics.
-- Stimulus loopback/cross-feed.
-- Live pacing and receive jitter.
-- Live frame ordering and gap behavior.
-- Natural-stop agreement with manual waveform inspection.
-- Whether the synthetic fixture produces distinguishable post-stimulus agent
-  audio.
+- Actual `self`/`opposite` behavior and track-to-leg orientation.
+- Stability and separation of both returned tracks.
+- Negotiated media format, framing, jitter, gaps, and ordering.
+- Returned-fixture correlation under the live topology.
+- Cross-feed and overlap behavior.
+- Natural-stop and forced-stop detector agreement with waveform inspection.
+- Whether the fixture produces a distinguishable later agent response.
+- Which finite detector candidate, if any, passes all calibration labels.
 
 ## Gate checklist
 
-- [x] Isolated bench-only application.
-- [x] Production VoiceAgent unchanged.
-- [x] Probe-specific strict decoder.
-- [x] Same-process injected monotonic clock.
-- [x] Bounded one-use stream authentication.
-- [x] Signed and bounded webhook path.
-- [x] Bounded fixture, capture, events, attempts, call, and teardown.
-- [x] Offline fixture, pacing, ordering, detector, privacy, and controller tests.
-- [x] Offline abrupt-stop waveform validation.
-- [ ] Deterministic live stimulus injection.
-- [ ] Stable live media format.
-- [ ] Defensible live agent-track mapping.
-- [ ] No material live contamination.
-- [ ] No unresolved live ordering anomaly.
-- [ ] Live natural-stop/manual-waveform agreement.
-- [ ] Live post-stimulus agent response.
+- [x] Bench-only application; production behavior unchanged.
+- [x] Joint common-interval track selection.
+- [x] Bounded returned-fixture matching and acoustic boundary.
+- [x] Separating silence and new-response requirement.
+- [x] Bridge-ready gate.
+- [x] Bounded pre-allocation authentication.
+- [x] Global lifecycle ordering plus track-local media ordering.
+- [x] Sanitized failed-attempt manifest outcome.
+- [x] Repository-anchored artifact path.
+- [x] Finite calibration evaluation support without auto-selection.
+- [x] Offline route/component/adversarial tests.
+- [ ] Separately authorized live capture.
+- [ ] Manual waveform agreement.
+- [ ] Completed bounded calibration.
+- [ ] Stable live format and track separation.
+- [ ] Independent review of live evidence and final Phase 2 boundary.
 
-Phase 3 must not begin until every unchecked item passes and this report is
-updated to **GO**. A live **NO-GO** must leave the preregistration unchanged
-pending a separately reviewed amendment.
-
-## Measurement profile
-
-`bench/measurement_profile.json` was deliberately not created. The methodology
-allows it only after a live GO freezes the observed format, track mapping,
-detector settings, contamination criterion, and ordering tolerance.
+Phase 3 must not begin while any item remains unchecked. A live failure is
+`NO-GO`, not permission to weaken the endpoint. `measurement_profile.json` may
+be created only after a genuine, manually confirmed, independently reviewed
+live GO.

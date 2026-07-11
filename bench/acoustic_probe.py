@@ -13,9 +13,11 @@ import base64
 import contextlib
 import csv
 import hmac
+import io
 import json
 import math
 import os
+import stat
 import statistics
 import subprocess
 import sys
@@ -27,7 +29,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import httpx
 import uvicorn
@@ -85,6 +87,12 @@ SAMPLE_RATE = 16_000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
 PACING_TOLERANCE_NS = 10_000_000
+AUTH_HANDSHAKE_TIMEOUT_SECONDS = 2.0
+SEPARATING_SILENCE_MS = 100
+FIXTURE_ALIGNMENT_SEARCH_MS = 2_000
+MIN_FIXTURE_CORRELATION = 0.85
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+ARTIFACT_ROOT = REPOSITORY_ROOT / "bench" / "artifacts"
 # Predeclared Phase 2 diagnostic criteria. They are candidates for live
 # calibration, not a frozen Phase 3 measurement profile.
 MAX_STIMULUS_ENERGY_RATIO_ON_AGENT_TRACK = 0.10
@@ -125,6 +133,10 @@ FAILURE_CATEGORIES = frozenset(
         "agent_audio_not_observed",
         "natural_stop_not_observed",
         "stimulus_send_failed",
+        "fixture_match_missing",
+        "fixture_match_ambiguous",
+        "stimulus_overlap",
+        "stimulus_boundary_ambiguous",
         "post_stimulus_response_not_observed",
         "capture_limit_reached",
         "socket_error",
@@ -182,11 +194,34 @@ def load_fixture(
     maximum_seconds: float = MAX_FIXTURE_SECONDS,
 ) -> Fixture:
     """Validate a bounded local synthetic-speech PCM16 WAV."""
-    raw = path.read_bytes()
-    if len(raw) > maximum_bytes:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise ValueError("fixture_not_regular") from exc
+    if not stat.S_ISREG(before.st_mode) or path.is_symlink():
+        raise ValueError("fixture_not_regular")
+    if before.st_size > maximum_bytes:
         raise ValueError("fixture_too_large")
     try:
-        with wave.open(str(path), "rb") as source:
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            raw = handle.read(maximum_bytes + 1)
+            after = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise ValueError("fixture_read_failed") from exc
+    if len(raw) > maximum_bytes:
+        raise ValueError("fixture_too_large")
+    if (
+        opened.st_dev != after.st_dev
+        or opened.st_ino != after.st_ino
+        or opened.st_size != after.st_size
+        or after.st_size != len(raw)
+        or before.st_dev != opened.st_dev
+        or before.st_ino != opened.st_ino
+    ):
+        raise ValueError("fixture_changed_during_read")
+    try:
+        with wave.open(io.BytesIO(raw), "rb") as source:
             if source.getcomptype() != "NONE":
                 raise ValueError("fixture_not_pcm")
             if source.getnchannels() != CHANNELS:
@@ -310,7 +345,7 @@ class BenchConfig:
     public_wss_base: str
     target_legs: str
     fixture: Fixture
-    artifacts_root: Path = Path("bench/artifacts")
+    artifacts_root: Path = ARTIFACT_ROOT
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     call_seconds: int = MAX_CALL_SECONDS
     capture_seconds: int = MAX_CAPTURE_SECONDS
@@ -403,6 +438,8 @@ class ProbeController:
         self.answered: set[str] = set()
         self.streams_started: set[str] = set()
         self.bridge_sent = False
+        self.bridge_ready = asyncio.Event()
+        self.probe_socket_active = False
         self.states: list[ProbeState] = []
         self.failure: str | None = None
         self.agent: VoiceAgent | None = None
@@ -410,7 +447,10 @@ class ProbeController:
         self.artifacts = ArtifactDirectory(config.artifacts_root, self.run_id)
         self.started_ns = self.clock.monotonic_ns()
         self.last_transition_ns = self.started_ns
-        self._write_manifest("CONDITIONAL GO")
+        self.teardown_result = "not_started"
+        self._manifest_outcome = "CONDITIONAL GO"
+        self._manifest_extra: dict[str, object] = {}
+        self._write_manifest("CONDITIONAL GO", attempt_number=1)
         self.artifacts.append_jsonl(
             "events.jsonl",
             {"event": "probe_started", "host_monotonic_ns": self.started_ns},
@@ -469,6 +509,13 @@ class ProbeController:
                     "category": category,
                     "host_monotonic_ns": self.clock.monotonic_ns(),
                 },
+            )
+            self._write_manifest(
+                "NO-GO",
+                failure_category=category,
+                terminal_outcome="capture_failed",
+                attempt_number=1,
+                teardown_result=self.teardown_result,
             )
 
     async def dial(self) -> None:
@@ -540,6 +587,7 @@ class ProbeController:
         if event_type == "call.bridged" and ccid in {self.leg_a, self.leg_b}:
             if ProbeState.BRIDGED not in self.states:
                 self.transition(ProbeState.BRIDGED)
+                self.bridge_ready.set()
                 self.artifacts.append_jsonl(
                     "events.jsonl",
                     {
@@ -554,9 +602,11 @@ class ProbeController:
         ):
             self.fail("call_hangup")
 
-    async def _start_stream(self, ccid: str, *, role: str) -> None:
-        token = self.tokens.issue(self.run_id, ccid, self.clock.monotonic_ns())
-        route = "probe" if role == "probe" else "agent"
+    async def _start_stream(
+        self, ccid: str, *, role: Literal["probe", "agent"]
+    ) -> None:
+        route = role
+        token = self.tokens.issue(self.run_id, ccid, route, self.clock.monotonic_ns())
         payload: dict[str, object] = {
             "stream_url": (
                 f"{self.config.public_wss_base.rstrip('/')}/ws/{route}/{self.run_id}"
@@ -578,21 +628,48 @@ class ProbeController:
         self.transition(ProbeState.STREAM_AUTHORIZED)
 
     async def hangup_both(self) -> None:
-        async def hangup(ccid: str) -> None:
-            with contextlib.suppress(Exception):
+        async def hangup(ccid: str) -> bool:
+            try:
                 await self.call_control.action(ccid, "hangup")
+            except Exception:
+                return False
+            return True
 
         calls = [hangup(ccid) for ccid in (self.leg_a, self.leg_b) if ccid]
         if calls:
             try:
                 async with asyncio.timeout(TEARDOWN_TIMEOUT_SECONDS):
-                    await asyncio.gather(*calls)
+                    results = await asyncio.gather(*calls)
+                    self.teardown_result = (
+                        "both_legs_hung_up" if all(results) else "hangup_failed"
+                    )
             except TimeoutError:
+                self.teardown_result = "teardown_timeout"
                 self.fail("teardown_timeout")
+        else:
+            self.teardown_result = "no_identified_legs"
+        if self.failure is not None:
+            self._write_manifest(
+                "NO-GO",
+                failure_category=self.failure,
+                terminal_outcome="capture_failed",
+                attempt_number=1,
+                teardown_result=self.teardown_result,
+            )
+        elif ProbeState.CAPTURE_COMPLETED in self.states:
+            refreshed = dict(self._manifest_extra)
+            refreshed["teardown_result"] = self.teardown_result
+            self._write_manifest(self._manifest_outcome, **refreshed)
 
     def _write_manifest(self, outcome: str, **extra: object) -> None:
+        self._manifest_outcome = outcome
+        self._manifest_extra = dict(extra)
         commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=REPOSITORY_ROOT,
         ).stdout.strip()
         dirty = bool(
             subprocess.run(
@@ -600,6 +677,7 @@ class ProbeController:
                 capture_output=True,
                 text=True,
                 check=False,
+                cwd=REPOSITORY_ROOT,
             ).stdout
         )
         manifest: dict[str, object] = {
@@ -645,38 +723,72 @@ class ProbeController:
 
 
 async def _authenticate_probe_socket(
-    ws: WebSocket, controller: ProbeController
+    ws: WebSocket,
+    controller: ProbeController,
+    *,
+    role: Literal["probe", "agent"],
 ) -> tuple[StreamAuthorization, ConnectedFrame | None]:
     header_token = ws.headers.get("x-telnyx-streaming-auth-token", "")
     connected: ConnectedFrame | None = None
     if not header_token:
         await ws.accept()
-        raw = await ws.receive_text()
+        try:
+            async with asyncio.timeout(AUTH_HANDSHAKE_TIMEOUT_SECONDS):
+                raw = await ws.receive_text()
+        except TimeoutError as exc:
+            raise ProbeProtocolError("stream_auth_failed") from exc
         frame = decode_probe_message(raw, controller.clock.monotonic_ns())
         if not isinstance(frame, ConnectedFrame):
             raise ProbeProtocolError("stream_auth_failed")
         connected = frame
     token = extract_stream_token(ws.headers, connected)
     authorization = controller.tokens.consume(
-        token, run_id=controller.run_id, now_ns=controller.clock.monotonic_ns()
+        token,
+        run_id=controller.run_id,
+        role=role,
+        now_ns=controller.clock.monotonic_ns(),
     )
     if header_token:
         await ws.accept()
     return authorization, connected
 
 
+def validate_artifact_root(root: Path) -> Path:
+    """Resolve the live artifact root inside this repository without symlinks."""
+    expected = ARTIFACT_ROOT
+    if root != expected:
+        raise ValueError("artifact_root_mismatch")
+    bench_root = (REPOSITORY_ROOT / "bench").resolve()
+    resolved_parent = root.parent.resolve(strict=True)
+    if resolved_parent != bench_root or root.is_symlink():
+        raise ValueError("artifact_root_escape")
+    return root
+
+
 def _candidate_agent_track(
     capture: BoundedCapture, config: DetectorConfig
 ) -> tuple[str | None, dict[str, DetectorAnalysis], bool]:
+    common_bytes = min(len(pcm) for pcm in capture.tracks.values())
+    if common_bytes == 0:
+        return None, {}, False
     analyses = {
-        track: analyze_acoustic_stop(bytes(pcm), config)
+        track: analyze_acoustic_stop(bytes(pcm[:common_bytes]), config)
         for track, pcm in capture.tracks.items()
     }
     candidates = [
         track for track, analysis in analyses.items() if analysis.result is not None
     ]
     if len(candidates) == 1:
-        return candidates[0], analyses, False
+        candidate = candidates[0]
+        other_tracks = [track for track in analyses if track != candidate]
+        mixed = any(
+            window.rms_dbfs >= config.activity_threshold_dbfs
+            for track in other_tracks
+            for window in analyses[track].windows
+        )
+        if not mixed:
+            return candidate, analyses, False
+        return None, analyses, True
     return None, analyses, len(candidates) > 1
 
 
@@ -719,6 +831,148 @@ def _absolute_correlation(left: bytes, right: bytes) -> float:
         power_b += centered_b * centered_b
     denominator = math.sqrt(power_a * power_b)
     return 0.0 if denominator == 0 else abs(numerator / denominator)
+
+
+def _energy_envelope(pcm16: bytes, frame_samples: int = 320) -> tuple[float, ...]:
+    values = _samples(pcm16)
+    return tuple(
+        math.sqrt(
+            sum(int(value) * int(value) for value in values[start:end]) / (end - start)
+        )
+        for start in range(0, len(values), frame_samples)
+        if (end := min(start + frame_samples, len(values))) > start
+    )
+
+
+def _cosine_similarity(left: tuple[float, ...], right: tuple[float, ...]) -> float:
+    numerator = sum(a * b for a, b in zip(left, right, strict=True))
+    left_power = sum(value * value for value in left)
+    right_power = sum(value * value for value in right)
+    denominator = math.sqrt(left_power * right_power)
+    return 0.0 if denominator == 0 else numerator / denominator
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureMatch:
+    start_byte: int
+    end_byte: int
+    alignment_frames: int
+    energy_envelope_correlation: float
+    ambiguous_alignment: bool
+
+
+def match_fixture_reference(
+    candidate: bytes,
+    fixture: Fixture,
+    *,
+    maximum_alignment_ms: int = FIXTURE_ALIGNMENT_SEARCH_MS,
+    minimum_correlation: float = MIN_FIXTURE_CORRELATION,
+) -> FixtureMatch | None:
+    """Match unchanged 16 kHz PCM using a bounded 20 ms energy envelope search."""
+    fixture_envelope = _energy_envelope(fixture.pcm16)
+    candidate_envelope = _energy_envelope(candidate)
+    if not fixture_envelope or len(candidate_envelope) < len(fixture_envelope):
+        return None
+    max_alignment = min(
+        maximum_alignment_ms // FRAME_MS,
+        len(candidate_envelope) - len(fixture_envelope),
+    )
+    scored = [
+        (
+            _cosine_similarity(
+                candidate_envelope[offset : offset + len(fixture_envelope)],
+                fixture_envelope,
+            ),
+            offset,
+        )
+        for offset in range(max_alignment + 1)
+    ]
+    score, offset = max(scored)
+    if score < minimum_correlation:
+        return None
+    frame_bytes = fixture.frame_bytes
+    return FixtureMatch(
+        start_byte=offset * frame_bytes,
+        end_byte=(offset + len(fixture_envelope)) * frame_bytes,
+        alignment_frames=offset,
+        energy_envelope_correlation=score,
+        ambiguous_alignment=sum(
+            candidate_score >= minimum_correlation
+            and math.isclose(candidate_score, score, abs_tol=1e-9)
+            for candidate_score, _ in scored
+        )
+        > 1,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class WindowStatistics:
+    active_frame_count: int
+    frame_count: int
+    rms_dbfs: float
+    noise_floor_dbfs: float
+    peak_absolute_level: int
+    clipping_count: int
+    global_sequence_gaps: int
+    global_sequence_regressions: int
+    global_duplicates: int
+    track_chunk_gaps: int
+    track_chunk_regressions: int
+    track_timestamp_regressions: int
+
+
+def summarize_window(
+    pcm16: bytes,
+    detector: DetectorConfig,
+    capture: BoundedCapture,
+    *,
+    track: str,
+    start_byte: int,
+    end_byte: int,
+) -> WindowStatistics:
+    envelope = _energy_envelope(pcm16)
+    dbfs = tuple(
+        -math.inf if value == 0 else 20 * math.log10(value / 32_768)
+        for value in envelope
+    )
+    values = _samples(pcm16)
+    counts = capture.ordering.counts
+    quiet = tuple(value for value in dbfs if value <= detector.silence_threshold_dbfs)
+    position = 0
+    selected_frames: list[MediaFrame] = []
+    for frame in capture.frames:
+        if frame.track != track:
+            continue
+        frame_end = position + len(frame.pcm16)
+        if frame_end > start_byte and position < end_byte:
+            selected_frames.append(frame)
+        position = frame_end
+    chunk_gaps = 0
+    chunk_regressions = 0
+    timestamp_regressions = 0
+    for previous, current in zip(selected_frames, selected_frames[1:], strict=False):
+        if current.chunk < previous.chunk:
+            chunk_regressions += 1
+        elif current.chunk > previous.chunk + 1:
+            chunk_gaps += current.chunk - previous.chunk - 1
+        if current.timestamp < previous.timestamp:
+            timestamp_regressions += 1
+    return WindowStatistics(
+        active_frame_count=sum(
+            value >= detector.activity_threshold_dbfs for value in dbfs
+        ),
+        frame_count=len(selected_frames),
+        rms_dbfs=_rms_dbfs(pcm16),
+        noise_floor_dbfs=float(statistics.median(quiet)) if quiet else -math.inf,
+        peak_absolute_level=max((abs(int(value)) for value in values), default=0),
+        clipping_count=sum(int(value) in {-32_768, 32_767} for value in values),
+        global_sequence_gaps=counts.sequence_gaps,
+        global_sequence_regressions=counts.sequence_regressions,
+        global_duplicates=counts.duplicates,
+        track_chunk_gaps=chunk_gaps,
+        track_chunk_regressions=chunk_regressions,
+        track_timestamp_regressions=timestamp_regressions,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -923,13 +1177,21 @@ def create_app(
         stimulus_task: asyncio.Task[PacingSummary] | None = None
         stimulus_start_offsets: dict[str, int] = {}
         stimulus_end_offsets: dict[str, int] = {}
+        fixture_match: FixtureMatch | None = None
+        stimulus_track: str | None = None
         actual_format: MediaFormat | None = None
         natural_analysis: DetectorAnalysis | None = None
         post_analysis: DetectorAnalysis | None = None
         message_rows = 0
         first_tracks_seen: set[str] = set()
+        if controller.probe_socket_active:
+            await ws.close(code=1008)
+            return
+        controller.probe_socket_active = True
         try:
-            authorization, connected = await _authenticate_probe_socket(ws, controller)
+            authorization, connected = await _authenticate_probe_socket(
+                ws, controller, role="probe"
+            )
             controller.transition(ProbeState.STREAM_CONNECTED)
             if connected is not None:
                 controller.artifacts.append_jsonl(
@@ -953,6 +1215,7 @@ def create_app(
                     if isinstance(frame, ConnectedFrame):
                         continue
                     if isinstance(frame, StartFrame):
+                        capture.observe_non_media(frame)
                         validate_authorized_call_id(
                             frame.call_control_id, authorization.call_control_id
                         )
@@ -971,6 +1234,11 @@ def create_app(
                                 "host_monotonic_ns": frame.host_receive_monotonic_ns,
                             },
                         )
+                        try:
+                            async with asyncio.timeout(STATE_TIMEOUT_SECONDS):
+                                await controller.bridge_ready.wait()
+                        except TimeoutError as exc:
+                            raise ProbeProtocolError("bridge_failed") from exc
                         continue
                     if isinstance(frame, MediaFrame):
                         capture.append(frame)
@@ -1077,11 +1345,6 @@ def create_app(
                                     ) from exc
                                 if not pacing.within_tolerance:
                                     raise ProbeProtocolError("stimulus_send_failed")
-                                stimulus_end_offsets = {
-                                    track: len(data)
-                                    for track, data in capture.tracks.items()
-                                }
-                                controller.transition(ProbeState.STIMULUS_COMPLETED)
                                 active_frame_index = (
                                     config.fixture.first_active_sample
                                     // (config.fixture.frame_bytes // SAMPLE_WIDTH)
@@ -1146,35 +1409,180 @@ def create_app(
                                         }
                                     )
                                 )
-                            post_audio = bytes(
-                                capture.tracks[agent_track][
-                                    stimulus_end_offsets[agent_track] :
-                                ]
+                            relative_available = min(
+                                len(capture.tracks[track])
+                                - stimulus_start_offsets[track]
+                                for track in capture.tracks
                             )
-                            post = analyze_acoustic_stop(post_audio, config.detector)
-                            if post.result is not None:
-                                post_analysis = post
-                                controller.transition(
-                                    ProbeState.POST_STIMULUS_AGENT_AUDIO_OBSERVED
-                                )
-                                post_active = _first_active_sample(
-                                    post,
-                                    config.detector.activity_threshold_dbfs,
-                                )
-                                controller.artifacts.append_jsonl(
-                                    "events.jsonl",
-                                    {
-                                        "event": "post_stimulus_agent_audio_active",
-                                        "sample_index_after_stimulus": post_active,
-                                        "host_monotonic_ns": (
-                                            frame.host_receive_monotonic_ns
+                            required_search_bytes = (
+                                len(config.fixture.frames) * config.fixture.frame_bytes
+                                + FIXTURE_ALIGNMENT_SEARCH_MS
+                                * SAMPLE_RATE
+                                // 1_000
+                                * SAMPLE_WIDTH
+                            )
+                            if (
+                                fixture_match is None
+                                and relative_available >= required_search_bytes
+                            ):
+                                matches = {
+                                    track: match_fixture_reference(
+                                        bytes(
+                                            capture.tracks[track][
+                                                stimulus_start_offsets[
+                                                    track
+                                                ] : stimulus_start_offsets[track]
+                                                + relative_available
+                                            ]
                                         ),
-                                    },
+                                        config.fixture,
+                                    )
+                                    for track in capture.tracks
+                                }
+                                matched = [
+                                    (track, match)
+                                    for track, match in matches.items()
+                                    if match is not None
+                                ]
+                                if not matched:
+                                    raise ProbeProtocolError("fixture_match_missing")
+                                if len(matched) != 1:
+                                    raise ProbeProtocolError("fixture_match_ambiguous")
+                                stimulus_track, fixture_match = matched[0]
+                                if stimulus_track == agent_track:
+                                    raise ProbeProtocolError("track_ambiguous")
+                                if fixture_match.ambiguous_alignment:
+                                    raise ProbeProtocolError(
+                                        "stimulus_boundary_ambiguous"
+                                    )
+                            if fixture_match is not None and stimulus_track is not None:
+                                separation_bytes = (
+                                    SEPARATING_SILENCE_MS
+                                    * SAMPLE_RATE
+                                    // 1_000
+                                    * SAMPLE_WIDTH
                                 )
-                                controller.transition(ProbeState.CAPTURE_COMPLETED)
-                                break
+                                boundary_relative = (
+                                    fixture_match.end_byte + separation_bytes
+                                )
+                                if relative_available < boundary_relative:
+                                    continue
+                                stimulus_silence = bytes(
+                                    capture.tracks[stimulus_track][
+                                        (
+                                            stimulus_start_offsets[stimulus_track]
+                                            + fixture_match.end_byte
+                                        ) : (
+                                            stimulus_start_offsets[stimulus_track]
+                                            + boundary_relative
+                                        )
+                                    ]
+                                )
+                                agent_silence = bytes(
+                                    capture.tracks[agent_track][
+                                        (
+                                            stimulus_start_offsets[agent_track]
+                                            + fixture_match.end_byte
+                                        ) : (
+                                            stimulus_start_offsets[agent_track]
+                                            + boundary_relative
+                                        )
+                                    ]
+                                )
+                                if (
+                                    _rms_dbfs(stimulus_silence)
+                                    > config.detector.silence_threshold_dbfs
+                                ):
+                                    raise ProbeProtocolError(
+                                        "stimulus_boundary_ambiguous"
+                                    )
+                                if (
+                                    _rms_dbfs(agent_silence)
+                                    > config.detector.silence_threshold_dbfs
+                                ):
+                                    raise ProbeProtocolError("stimulus_overlap")
+                                stimulus_end_offsets = {
+                                    track: stimulus_start_offsets[track]
+                                    + boundary_relative
+                                    for track in capture.tracks
+                                }
+                                stimulus_agent_audio = bytes(
+                                    capture.tracks[agent_track][
+                                        stimulus_start_offsets[
+                                            agent_track
+                                        ] : stimulus_end_offsets[agent_track]
+                                    ]
+                                )
+                                reference_audio = bytes(
+                                    capture.tracks[stimulus_track][
+                                        stimulus_start_offsets[
+                                            stimulus_track
+                                        ] : stimulus_end_offsets[stimulus_track]
+                                    ]
+                                )
+                                if not analyze_contamination(
+                                    stimulus_agent_audio, reference_audio
+                                ).passed:
+                                    raise ProbeProtocolError("stimulus_overlap")
+                                controller.transition(ProbeState.STIMULUS_COMPLETED)
+                                common_post_bytes = min(
+                                    len(capture.tracks[track])
+                                    - stimulus_end_offsets[track]
+                                    for track in capture.tracks
+                                )
+                                post_audio = bytes(
+                                    capture.tracks[agent_track][
+                                        stimulus_end_offsets[agent_track] : (
+                                            stimulus_end_offsets[agent_track]
+                                            + common_post_bytes
+                                        )
+                                    ]
+                                )
+                                post = analyze_acoustic_stop(
+                                    post_audio, config.detector
+                                )
+                                if post.result is not None:
+                                    stimulus_post = bytes(
+                                        capture.tracks[stimulus_track][
+                                            stimulus_end_offsets[stimulus_track] : (
+                                                stimulus_end_offsets[stimulus_track]
+                                                + common_post_bytes
+                                            )
+                                        ]
+                                    )
+                                    if any(
+                                        value >= config.detector.activity_threshold_dbfs
+                                        for value in tuple(
+                                            -math.inf
+                                            if rms == 0
+                                            else 20 * math.log10(rms / 32_768)
+                                            for rms in _energy_envelope(stimulus_post)
+                                        )
+                                    ):
+                                        raise ProbeProtocolError("track_ambiguous")
+                                    post_analysis = post
+                                    controller.transition(
+                                        ProbeState.POST_STIMULUS_AGENT_AUDIO_OBSERVED
+                                    )
+                                    post_active = _first_active_sample(
+                                        post,
+                                        config.detector.activity_threshold_dbfs,
+                                    )
+                                    controller.artifacts.append_jsonl(
+                                        "events.jsonl",
+                                        {
+                                            "event": "post_stimulus_agent_audio_active",
+                                            "sample_index_after_boundary": post_active,
+                                            "host_monotonic_ns": (
+                                                frame.host_receive_monotonic_ns
+                                            ),
+                                        },
+                                    )
+                                    controller.transition(ProbeState.CAPTURE_COMPLETED)
+                                    break
                         continue
                     if isinstance(frame, MarkFrame):
+                        capture.observe_non_media(frame)
                         controller.artifacts.append_jsonl(
                             "events.jsonl",
                             {
@@ -1184,9 +1592,13 @@ def create_app(
                             },
                         )
                     elif isinstance(frame, ErrorFrame):
+                        capture.observe_non_media(frame)
                         raise ProbeProtocolError("socket_error")
                     elif isinstance(frame, StopFrame):
+                        capture.observe_non_media(frame)
                         break
+                    else:
+                        capture.observe_non_media(frame)
 
             if capture.ordering.unresolved:
                 raise ProbeProtocolError("media_ordering_anomaly")
@@ -1198,10 +1610,8 @@ def create_app(
                 raise ProbeProtocolError("track_missing")
             if not stimulus_start_offsets or not stimulus_end_offsets:
                 raise ProbeProtocolError("stimulus_send_failed")
-
-            stimulus_track = next(
-                track for track in capture.tracks if track != agent_track
-            )
+            if stimulus_track is None or fixture_match is None:
+                raise ProbeProtocolError("fixture_match_missing")
             contamination = analyze_contamination(
                 bytes(
                     capture.tracks[agent_track][
@@ -1237,6 +1647,42 @@ def create_app(
                 stimulus_start=stimulus_start_offsets,
                 stimulus_end=stimulus_end_offsets,
             )
+            natural_result = natural_analysis.result if natural_analysis else None
+            if natural_result is None:
+                raise ProbeProtocolError("natural_stop_not_observed")
+            window_statistics = {
+                track: {
+                    name: asdict(
+                        summarize_window(
+                            bytes(data[start:end]),
+                            config.detector,
+                            capture,
+                            track=track,
+                            start_byte=start,
+                            end_byte=end,
+                        )
+                    )
+                    for name, (start, end) in {
+                        "A_agent_only_greeting": (
+                            0,
+                            natural_result.silence_start_sample * 2,
+                        ),
+                        "B_post_greeting_silence": (
+                            natural_result.silence_start_sample * 2,
+                            natural_result.confirmation_sample * 2,
+                        ),
+                        "C_verified_stimulus_reference": (
+                            stimulus_start_offsets[track],
+                            stimulus_end_offsets[track],
+                        ),
+                        "D_post_stimulus_agent_response": (
+                            stimulus_end_offsets[track],
+                            len(data),
+                        ),
+                    }.items()
+                }
+                for track, data in capture.tracks.items()
+            }
             controller.artifacts.write_json(
                 "detector_summary.json",
                 {
@@ -1248,11 +1694,13 @@ def create_app(
                     if post_analysis and post_analysis.result
                     else None,
                     "contamination": asdict(contamination),
+                    "fixture_match": asdict(fixture_match),
+                    "window_statistics": window_statistics,
                     "term": "harness-side acoustic stop candidate",
                 },
             )
             controller._write_manifest(
-                "GO",
+                "CAPTURE_COMPLETE_PENDING_REVIEW",
                 actual_media_format=asdict(actual_format) if actual_format else None,
                 track_mapping={
                     "agent": agent_track,
@@ -1268,12 +1716,30 @@ def create_app(
                     "late_frames": pacing.late_frames if pacing else None,
                     "within_tolerance": pacing.within_tolerance if pacing else None,
                 },
+                attempt_number=1,
+                terminal_outcome="capture_complete_pending_review",
+                teardown_result=controller.teardown_result,
+                promotion_prerequisites=(
+                    "manual_waveform_agreement",
+                    "bounded_calibration_review",
+                    "independent_review",
+                ),
             )
         except TimeoutError:
+            stimulus_failed = False
+            if stimulus_task is not None and stimulus_task.done() and pacing is None:
+                try:
+                    pacing = stimulus_task.result()
+                except (asyncio.CancelledError, Exception):
+                    stimulus_failed = True
             controller.fail(
-                "natural_stop_not_observed"
-                if agent_track is None
-                else "post_stimulus_response_not_observed"
+                "stimulus_send_failed"
+                if stimulus_failed
+                else (
+                    "natural_stop_not_observed"
+                    if agent_track is None
+                    else "post_stimulus_response_not_observed"
+                )
             )
         except ProbeProtocolError as exc:
             controller.fail(exc.category)
@@ -1282,13 +1748,20 @@ def create_app(
         except Exception:
             controller.fail("socket_error")
         finally:
-            if stimulus_task is not None and not stimulus_task.done():
-                stimulus_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await stimulus_task
+            if stimulus_task is not None:
+                if not stimulus_task.done():
+                    stimulus_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await stimulus_task
+                elif pacing is None:
+                    try:
+                        pacing = stimulus_task.result()
+                    except (asyncio.CancelledError, Exception):
+                        controller.fail("stimulus_send_failed")
             with contextlib.suppress(Exception):
                 await ws.close()
             await controller.hangup_both()
+            controller.probe_socket_active = False
 
     @app.websocket("/ws/agent/{run_id}")
     async def agent_ws(ws: WebSocket, run_id: str) -> None:
@@ -1299,7 +1772,9 @@ def create_app(
         agent: VoiceAgent | None = None
         media: MediaStream | None = None
         try:
-            authorization, _ = await _authenticate_probe_socket(ws, controller)
+            authorization, _ = await _authenticate_probe_socket(
+                ws, controller, role="agent"
+            )
             while True:
                 raw = await ws.receive_text()
                 event = decode(raw)
@@ -1386,19 +1861,20 @@ def _live_config(arguments: argparse.Namespace) -> BenchConfig:
         public_wss_base=required["BENCH_PUBLIC_WSS_BASE"],
         target_legs=target_legs,
         fixture=load_fixture(fixture_value),
+        artifacts_root=validate_artifact_root(ARTIFACT_ROOT),
     )
 
 
 def _run_live_preflight() -> None:
     """Refuse dialing unless ignore, tests, lint, and types are currently clean."""
     checks = (
-        (["git", "check-ignore", "-q", "bench/artifacts/"], "artifact ignore rule"),
+        (["git", "check-ignore", "-q", str(ARTIFACT_ROOT)], "artifact ignore rule"),
         ([sys.executable, "-m", "pytest", "-q"], "offline tests"),
         ([sys.executable, "-m", "ruff", "check", "onset/", "bench/", "tests/"], "Ruff"),
         ([sys.executable, "-m", "mypy", "onset/", "bench/", "tests/"], "mypy"),
     )
     for command, label in checks:
-        result = subprocess.run(command, check=False)
+        result = subprocess.run(command, check=False, cwd=REPOSITORY_ROOT)
         if result.returncode != 0:
             raise SystemExit(f"live preflight failed: {label}")
 
