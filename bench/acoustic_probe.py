@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from urllib.parse import urlsplit
 
 import httpx
 import uvicorn
@@ -383,6 +384,7 @@ class BenchConfig:
     settings: Settings
     agent_number: str
     harness_number: str
+    harness_connection_id: str
     public_wss_base: str
     target_legs: str
     fixture: Fixture
@@ -395,10 +397,27 @@ class BenchConfig:
     def __post_init__(self) -> None:
         if self.target_legs not in {"self", "opposite"}:
             raise ValueError("target_legs must be explicit self or opposite")
-        if not self.public_wss_base.startswith("wss://"):
+        parsed_wss = urlsplit(self.public_wss_base)
+        if (
+            parsed_wss.scheme != "wss"
+            or not parsed_wss.hostname
+            or parsed_wss.username is not None
+            or parsed_wss.password is not None
+            or parsed_wss.query
+            or parsed_wss.fragment
+            or parsed_wss.path not in {"", "/"}
+        ):
             raise ValueError("public_wss_base must use wss")
-        if not self.agent_number or not self.harness_number:
-            raise ValueError("both configured phone numbers are required")
+        if (
+            not self.agent_number
+            or not self.harness_number
+            or not self.harness_connection_id
+        ):
+            raise ValueError("both numbers and the harness connection are required")
+        if hmac.compare_digest(
+            self.harness_connection_id, self.settings.telnyx_connection_id
+        ):
+            raise ValueError("agent and harness connections must be distinct")
         if not self.settings.half_duplex:
             raise ValueError("Phase 2 requires the safe half-duplex listening policy")
         if not 1 <= self.attempts <= MAX_LIVE_ATTEMPTS:
@@ -407,6 +426,10 @@ class BenchConfig:
             raise ValueError("call duration cap exceeded")
         if not 1 <= self.capture_seconds <= MAX_CAPTURE_SECONDS:
             raise ValueError("capture duration cap exceeded")
+
+    @property
+    def public_webhook_url(self) -> str:
+        return f"https://{urlsplit(self.public_wss_base).netloc}/webhook"
 
 
 class SafeCallControl:
@@ -420,13 +443,38 @@ class SafeCallControl:
             timeout=httpx.Timeout(10.0),
         )
 
-    async def dial(self, *, to: str, from_: str) -> str:
+    async def _verify_number_assignment(
+        self, number: str, expected_connection_id: str
+    ) -> None:
+        response = await self._http.get(
+            "/phone_numbers",
+            params={"filter[phone_number]": number, "page[size]": "1"},
+        )
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        if (
+            not isinstance(data, list)
+            or len(data) != 1
+            or not isinstance(data[0], dict)
+            or data[0].get("phone_number") != number
+            or data[0].get("status") != "active"
+            or data[0].get("connection_id") != expected_connection_id
+        ):
+            raise RuntimeError("number_assignment_mismatch")
+
+    async def dial(
+        self, *, to: str, from_: str, connection_id: str, webhook_url: str
+    ) -> str:
+        await self._verify_number_assignment(from_, connection_id)
+        await self._verify_number_assignment(to, self.settings.telnyx_connection_id)
         response = await self._http.post(
             "/calls",
             json={
-                "connection_id": self.settings.telnyx_connection_id,
+                "connection_id": connection_id,
                 "to": to,
                 "from": from_,
+                "webhook_url": webhook_url,
+                "webhook_url_method": "POST",
             },
         )
         response.raise_for_status()
@@ -652,7 +700,10 @@ class ProbeController:
         self.transition(ProbeState.DIAL_REQUESTED)
         try:
             self.leg_a = await self.call_control.dial(
-                to=self.config.agent_number, from_=self.config.harness_number
+                to=self.config.agent_number,
+                from_=self.config.harness_number,
+                connection_id=self.config.harness_connection_id,
+                webhook_url=self.config.public_webhook_url,
             )
             self.transition(ProbeState.LEG_A_IDENTIFIED)
         except Exception as exc:
@@ -2363,6 +2414,9 @@ def _live_config(arguments: argparse.Namespace) -> BenchConfig:
     required = {
         "BENCH_AGENT_NUMBER": os.environ.get("BENCH_AGENT_NUMBER", ""),
         "BENCH_HARNESS_NUMBER": os.environ.get("BENCH_HARNESS_NUMBER", ""),
+        "BENCH_HARNESS_CONNECTION_ID": os.environ.get(
+            "BENCH_HARNESS_CONNECTION_ID", ""
+        ),
         "BENCH_PUBLIC_WSS_BASE": os.environ.get("BENCH_PUBLIC_WSS_BASE", ""),
     }
     missing = [name for name, value in required.items() if not value]
@@ -2374,6 +2428,7 @@ def _live_config(arguments: argparse.Namespace) -> BenchConfig:
         settings=settings,
         agent_number=required["BENCH_AGENT_NUMBER"],
         harness_number=required["BENCH_HARNESS_NUMBER"],
+        harness_connection_id=required["BENCH_HARNESS_CONNECTION_ID"],
         public_wss_base=required["BENCH_PUBLIC_WSS_BASE"],
         target_legs=target_legs,
         fixture=load_fixture(fixture_value),

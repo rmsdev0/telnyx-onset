@@ -16,8 +16,12 @@ An eighth run proved that `both_tracks` does not return WebSocket-injected audio
 on the agent socket's provider-outbound track under this topology. It did,
 however, expose causal post-greeting activity on the independently streamed
 probe leg. A ninth cross-leg/`both_tracks` run retained exact diagnostic WAVs
-and showed both inbound legs were quiet after greeting. Probe-leg outbound
-streaming remains the final untested WebSocket direction.
+and showed both inbound legs were quiet after greeting. A tenth run requested
+probe-leg `both_tracks` but received 1,067 inbound and zero outbound frames.
+The subsequent sanitized configuration audit found that the harness number is
+assigned to a separate Call Control application, while the bench had originated
+through the agent application's connection. Correct separate-application
+origination remains untested.
 No fixture match, manual waveform review, detector calibration, or empirical GO
 was produced. Phase 3 remains blocked.
 
@@ -31,6 +35,8 @@ was produced. Phase 3 remains blocked.
   (`Capture both agent-leg media tracks`)
 - Cross-leg/`both_tracks` live revision: `9d60c96`
   (`Measure Phase 2 across isolated call legs`)
+- Probe-outbound live revision: `e17ec2f`
+  (`Capture probe-leg outbound media`)
 - Branch: `duplex`
 - Methodology authority: `BENCHMARK_PLAN.md`, unchanged
 - Production runtime modules modified: none
@@ -284,10 +290,15 @@ This is waveform agreement validation, not a human-perception measurement.
 
 ## Post-NO-GO topology correction prepared offline
 
-The inbound-only dual-socket, agent-socket outbound, and combined
-agent-`both_tracks`/cross-leg hypotheses are empirically rejected. The remaining
-topology requests Telnyx's documented `both_tracks` mode on the probe leg and
-measures:
+The inbound-only dual-socket, agent-socket outbound, combined
+agent-`both_tracks`/cross-leg, and same-app probe-outbound hypotheses are
+empirically rejected. The configuration audit found that both the outbound
+harness leg and inbound agent leg had been originated/routed through the agent
+application even though the harness number belongs to a distinct application.
+The corrected topology originates through the trusted harness connection, uses
+a per-call HTTPS webhook override for that outbound leg, receives the agent leg
+through the existing agent application, requests `both_tracks` on the probe
+socket, and measures:
 
 - neutral channel A: provider `outbound` media from the probe-leg socket;
 - neutral channel B: provider `inbound` media from the agent-leg socket.
@@ -301,6 +312,15 @@ proven jointly by greeting activity, silence, fixture correlation, and
 post-stimulus response; no role is inferred from `inbound` or `outbound`. The
 two sockets retain independent ordering domains, with track-local measurement
 continuity. The probe socket performs fixture injection as before.
+
+The harness connection is required, nonempty, and distinct from the agent
+connection. Immediately before dialing, read-only Telnyx lookups require both
+numbers to be active and assigned to their expected connections. The dial
+payload uses the harness connection, harness caller ID, agent destination, and
+a per-call HTTPS webhook override derived from the authenticated WSS base. This
+avoids mutating the harness application's account-level webhook; only the
+already established temporary agent-application webhook workflow remains.
+Identifiers and URLs are not written to artifacts or ordinary logs.
 
 Every Window A-D boundary remains defined once in process monotonic time and
 mapped separately to the first frame at or after that boundary on each neutral
@@ -403,6 +423,14 @@ gate.
   hung up, the webhook was restored, and the tunnel was stopped. This rejects
   the combined inbound-leg hypothesis and motivates testing the still-unseen
   probe provider-outbound direction.
+- 2026-07-12, authorized iterative attempt 10 (`target_legs=opposite`, revision
+  `e17ec2f`): **NO-GO — `agent_audio_not_observed`**. The probe socket accepted
+  `both_tracks` but delivered 1,067 provider-inbound frames and zero
+  provider-outbound frames; the agent socket delivered 1,141 inbound frames.
+  No channel-A WAV or fixture transmission was possible. The diagnostic retained
+  only the bounded channel-B WAV, both legs were hung up, the agent webhook was
+  restored, and the tunnel was stopped. A read-only post-run assignment audit
+  then exposed the same-application origination mismatch described above.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -429,6 +457,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized causal-greeting inbound-topology attempt retained.
 - [x] One authorized agent-`both_tracks` topology attempt retained.
 - [x] One authorized combined cross-leg/`both_tracks` attempt retained.
+- [x] One authorized same-app probe-outbound attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

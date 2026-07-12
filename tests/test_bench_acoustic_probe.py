@@ -11,6 +11,7 @@ import wave
 from array import array
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -196,8 +197,12 @@ class FakeCallControl:
         self.actions: list[tuple[str, str, dict[str, object]]] = []
         self.dials = 0
 
-    async def dial(self, *, to: str, from_: str) -> str:
+    async def dial(
+        self, *, to: str, from_: str, connection_id: str, webhook_url: str
+    ) -> str:
         self.dials += 1
+        assert connection_id == "local-harness-connection"
+        assert webhook_url == "https://example.invalid/webhook"
         return "memory-leg-a"
 
     async def action(
@@ -236,6 +241,7 @@ def config(tmp_path: Path) -> BenchConfig:
         settings=settings,
         agent_number="agent-number-memory-only",
         harness_number="harness-number-memory-only",
+        harness_connection_id="local-harness-connection",
         public_wss_base="wss://example.invalid",
         target_legs="opposite",
         fixture=fixture,
@@ -436,6 +442,8 @@ async def test_controller_owns_leg_a_routes_leg_b_and_bridges(tmp_path: Path) ->
     manifest = (controller.artifacts.path / "manifest.json").read_text()
     assert cfg.agent_number not in manifest
     assert cfg.harness_number not in manifest
+    assert cfg.harness_connection_id not in manifest
+    assert cfg.public_webhook_url not in manifest
     assert "memory-leg-a" not in manifest
     assert "memory-leg-b" not in manifest
 
@@ -599,6 +607,7 @@ def test_live_config_requires_explicit_target_and_hard_bounds(tmp_path: Path) ->
             settings=cfg.settings,
             agent_number=cfg.agent_number,
             harness_number=cfg.harness_number,
+            harness_connection_id=cfg.harness_connection_id,
             public_wss_base=cfg.public_wss_base,
             target_legs="both",
             fixture=cfg.fixture,
@@ -609,6 +618,7 @@ def test_live_config_requires_explicit_target_and_hard_bounds(tmp_path: Path) ->
             settings=cfg.settings,
             agent_number=cfg.agent_number,
             harness_number=cfg.harness_number,
+            harness_connection_id=cfg.harness_connection_id,
             public_wss_base=cfg.public_wss_base,
             target_legs="self",
             fixture=cfg.fixture,
@@ -620,6 +630,7 @@ def test_live_config_requires_explicit_target_and_hard_bounds(tmp_path: Path) ->
             settings=cfg.settings,
             agent_number=cfg.agent_number,
             harness_number=cfg.harness_number,
+            harness_connection_id=cfg.harness_connection_id,
             public_wss_base=cfg.public_wss_base,
             target_legs="self",
             fixture=cfg.fixture,
@@ -636,11 +647,132 @@ def test_live_config_requires_explicit_target_and_hard_bounds(tmp_path: Path) ->
             settings=unsafe,
             agent_number=cfg.agent_number,
             harness_number=cfg.harness_number,
+            harness_connection_id=cfg.harness_connection_id,
             public_wss_base=cfg.public_wss_base,
             target_legs="self",
             fixture=cfg.fixture,
             artifacts_root=tmp_path / "five",
         )
+    with pytest.raises(ValueError, match="harness connection"):
+        BenchConfig(
+            settings=cfg.settings,
+            agent_number=cfg.agent_number,
+            harness_number=cfg.harness_number,
+            harness_connection_id="",
+            public_wss_base=cfg.public_wss_base,
+            target_legs="self",
+            fixture=cfg.fixture,
+            artifacts_root=tmp_path / "six",
+        )
+    with pytest.raises(ValueError, match="must be distinct"):
+        BenchConfig(
+            settings=cfg.settings,
+            agent_number=cfg.agent_number,
+            harness_number=cfg.harness_number,
+            harness_connection_id=cfg.settings.telnyx_connection_id,
+            public_wss_base=cfg.public_wss_base,
+            target_legs="self",
+            fixture=cfg.fixture,
+            artifacts_root=tmp_path / "seven",
+        )
+
+
+@pytest.mark.asyncio
+async def test_safe_dial_verifies_assignments_and_uses_harness_connection(
+    tmp_path: Path,
+) -> None:
+    cfg = config(tmp_path)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            number = request.url.params["filter[phone_number]"]
+            connection = (
+                cfg.harness_connection_id
+                if number == cfg.harness_number
+                else cfg.settings.telnyx_connection_id
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "phone_number": number,
+                            "status": "active",
+                            "connection_id": connection,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"data": {"call_control_id": "memory-leg"}})
+
+    control = SafeCallControl(cfg.settings)
+    await control._http.aclose()
+    control._http = httpx.AsyncClient(
+        base_url=cfg.settings.telnyx_api_base,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await control.dial(
+            to=cfg.agent_number,
+            from_=cfg.harness_number,
+            connection_id=cfg.harness_connection_id,
+            webhook_url=cfg.public_webhook_url,
+        )
+    finally:
+        await control.aclose()
+    assert result == "memory-leg"
+    assert [request.method for request in requests] == ["GET", "GET", "POST"]
+    payload = json.loads(requests[-1].content)
+    assert payload == {
+        "connection_id": cfg.harness_connection_id,
+        "from": cfg.harness_number,
+        "to": cfg.agent_number,
+        "webhook_url": cfg.public_webhook_url,
+        "webhook_url_method": "POST",
+    }
+
+
+@pytest.mark.asyncio
+async def test_safe_dial_rejects_assignment_mismatch_before_post(
+    tmp_path: Path,
+) -> None:
+    cfg = config(tmp_path)
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "phone_number": cfg.harness_number,
+                        "status": "active",
+                        "connection_id": "wrong",
+                    }
+                ]
+            },
+        )
+
+    control = SafeCallControl(cfg.settings)
+    await control._http.aclose()
+    control._http = httpx.AsyncClient(
+        base_url=cfg.settings.telnyx_api_base,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="number_assignment_mismatch"):
+            await control.dial(
+                to=cfg.agent_number,
+                from_=cfg.harness_number,
+                connection_id=cfg.harness_connection_id,
+                webhook_url=cfg.public_webhook_url,
+            )
+    finally:
+        await control.aclose()
+    assert methods == ["GET"]
 
 
 def test_contamination_metric_rejects_mixed_tracks() -> None:
@@ -946,6 +1078,7 @@ def test_probe_route_both_tracks_rejects_queued_fixture_as_response(
         settings=base.settings,
         agent_number=base.agent_number,
         harness_number=base.harness_number,
+        harness_connection_id=base.harness_connection_id,
         public_wss_base=base.public_wss_base,
         target_legs=base.target_legs,
         fixture=fixture,
@@ -1015,6 +1148,7 @@ def test_probe_route_requires_joint_silence_then_completes_lifecycle(
         settings=base.settings,
         agent_number=base.agent_number,
         harness_number=base.harness_number,
+        harness_connection_id=base.harness_connection_id,
         public_wss_base=base.public_wss_base,
         target_legs=base.target_legs,
         fixture=fixture,
@@ -1596,6 +1730,7 @@ def test_completed_stimulus_task_failure_is_retrieved_and_named(
         settings=base.settings,
         agent_number=base.agent_number,
         harness_number=base.harness_number,
+        harness_connection_id=base.harness_connection_id,
         public_wss_base=base.public_wss_base,
         target_legs=base.target_legs,
         fixture=base.fixture,
