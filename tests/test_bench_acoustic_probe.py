@@ -472,17 +472,25 @@ async def test_receive_only_probe_omits_all_bidirectional_options(
     await controller.dispatch("call.answered", {"call_control_id": "memory-leg-b"})
     await controller.dispatch("call.bridged", {"call_control_id": "memory-leg-a"})
     streams = [item for item in fake.actions if item[1] == "streaming_start"]
+    assert len(streams) == 3
     probe_payload = next(
         payload for ccid, _, payload in streams if ccid == "memory-leg-a"
     )
-    agent_payload = next(
-        payload for ccid, _, payload in streams if ccid == "memory-leg-b"
-    )
+    leg_b_payloads = [payload for ccid, _, payload in streams if ccid == "memory-leg-b"]
+    assert len(leg_b_payloads) == 2
+    agent_payload, monitor_payload = leg_b_payloads
     assert probe_payload["stream_track"] == "both_tracks"
     assert probe_payload["stream_codec"] == "PCMU"
     assert not any(key.startswith("stream_bidirectional") for key in probe_payload)
     assert agent_payload["stream_bidirectional_mode"] == "rtp"
     assert agent_payload["stream_bidirectional_target_legs"] == cfg.target_legs
+    assert "/ws/agent/" in str(agent_payload["stream_url"])
+    assert monitor_payload["stream_track"] == "both_tracks"
+    assert monitor_payload["stream_codec"] == "PCMU"
+    assert not any(key.startswith("stream_bidirectional") for key in monitor_payload)
+    assert "stream_auth_token" in monitor_payload
+    assert "/ws/monitor/" in str(monitor_payload["stream_url"])
+    assert "token=" not in str(monitor_payload["stream_url"])
 
 
 @pytest.mark.asyncio
@@ -498,7 +506,9 @@ async def test_concurrent_bridge_webhooks_start_probe_stream_once(
     release = asyncio.Event()
     starts = 0
 
-    async def delayed_start(ccid: str, *, role: Literal["probe", "agent"]) -> None:
+    async def delayed_start(
+        ccid: str, *, role: Literal["probe", "agent", "monitor"]
+    ) -> None:
         nonlocal starts
         assert ccid == "memory-leg-a" and role == "probe"
         starts += 1
@@ -891,7 +901,7 @@ def probe_media_raw(
 def _route_token(
     controller: ProbeController,
     call_id: str = "route-call",
-    role: Literal["probe", "agent"] = "probe",
+    role: Literal["probe", "agent", "monitor"] = "probe",
 ) -> str:
     return controller.tokens.issue(
         controller.run_id, call_id, role, controller.clock.monotonic_ns()
@@ -932,10 +942,13 @@ def send_cross_leg_pair(
     controller.mark_media_ready(acoustic_probe.AGENT_CHANNEL, time.monotonic_ns())
     controller.mark_greeting_started()
     state["agent_chunk"] += 1
+    receive_only = controller.config.probe_receive_only
+    # Receive-only mode sources channel B from the agent-leg monitor socket's
+    # provider outbound track; legacy mode uses the agent socket's inbound.
     agent_frame = MediaFrame(
         state["agent_sequence"],
         "agent-stream",
-        "inbound",
+        "outbound" if receive_only else "inbound",
         state["agent_chunk"],
         (state["agent_chunk"] - 1) * 20,
         reference_pcm,
@@ -945,7 +958,14 @@ def send_cross_leg_pair(
         controller.agent_integrity = BoundedCapture(
             max_bytes_per_track=1_000_000, max_event_rows=1_000
         )
-    controller.agent_integrity.append(agent_frame)
+    if receive_only:
+        if controller.monitor_integrity is None:
+            controller.monitor_integrity = BoundedCapture(
+                max_bytes_per_track=1_000_000, max_event_rows=1_000
+            )
+        controller.monitor_integrity.append(agent_frame)
+    else:
+        controller.agent_integrity.append(agent_frame)
     capture.append(
         acoustic_probe.AGENT_CHANNEL,
         agent_frame,
@@ -1422,7 +1442,13 @@ def test_receive_only_https_fixture_completes_joint_lifecycle(tmp_path: Path) ->
             assert hashlib.sha256(response.content).hexdigest() == fixture.sha256
 
             for index in range(104):
-                returned = fixture_frames[index - 5] if 5 <= index < 9 else silence
+                # The live monitor channel delivers the fixture after a G.711
+                # round trip, so the returned rendition is transcoded here.
+                returned = (
+                    pcmu_transcode_16k(fixture_frames[index - 5])
+                    if 5 <= index < 9
+                    else silence
+                )
                 send_pair(silence_pcmu, returned)
             for index in range(35):
                 send_pair(active_pcmu if index < 6 else silence_pcmu, silence)
@@ -1507,6 +1533,9 @@ def test_receive_only_probe_allows_variable_unmeasured_inbound_frame(
         controller.agent_integrity = BoundedCapture(
             max_bytes_per_track=1_000_000, max_event_rows=100
         )
+        controller.monitor_integrity = BoundedCapture(
+            max_bytes_per_track=1_000_000, max_event_rows=100
+        )
         token = _route_token(controller)
         with (
             pytest.raises(WebSocketDisconnect),
@@ -1537,6 +1566,230 @@ def test_receive_only_probe_allows_variable_unmeasured_inbound_frame(
         assert rows[0]["track"] == "probe_inbound_unmeasured"
         assert rows[0]["source_payload_bytes"] == 156
         assert rows[0]["payload_bytes"] == 624
+
+
+def _ulaw_encode_sample(sample: int) -> int:
+    bias = 0x84
+    clip = 32_635
+    sign = 0x80 if sample < 0 else 0
+    magnitude = min(-sample if sample < 0 else sample, clip) + bias
+    exponent = 7
+    mask = 0x4000
+    while exponent > 0 and not magnitude & mask:
+        exponent -= 1
+        mask >>= 1
+    mantissa = (magnitude >> (exponent + 3)) & 0x0F
+    return ~(sign | (exponent << 4) | mantissa) & 0xFF
+
+
+def pcmu_transcode_16k(pcm16: bytes) -> bytes:
+    """Simulate the provider path: 16 kHz PCM -> 8 kHz G.711 -> ZOH 16 kHz."""
+    samples = array("h")
+    samples.frombytes(pcm16)
+    ulaw = bytes(_ulaw_encode_sample(sample) for sample in samples[::2])
+    return acoustic_probe.decode_pcmu_8k_to_pcm16_16k(ulaw)
+
+
+def test_fixture_correlation_survives_pcmu_transcode() -> None:
+    fixture, frames = patterned_fixture()
+    silence = b"\x00\x00" * 320
+    candidate = silence * 2 + b"".join(
+        pcmu_transcode_16k(frame) for frame in frames
+    )
+    match = acoustic_probe.match_fixture_reference(candidate, fixture)
+    assert match is not None
+    assert match.alignment_frames == 2
+    assert match.energy_envelope_correlation >= 0.85
+    assert not match.ambiguous_alignment
+
+
+def test_monitor_route_rejects_probe_and_agent_tokens(tmp_path: Path) -> None:
+    cfg = replace(config(tmp_path), probe_receive_only=True)
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        wrong_roles: tuple[Literal["probe", "agent"], ...] = ("probe", "agent")
+        for role in wrong_roles:
+            token = _route_token(controller, role=role)
+            with (
+                pytest.raises(WebSocketDisconnect),
+                client.websocket_connect(
+                    f"/ws/monitor/{controller.run_id}",
+                    headers={"x-telnyx-streaming-auth-token": token},
+                ) as ws,
+            ):
+                ws.receive_text()
+        assert controller.failure == "stream_auth_failed"
+
+
+def test_monitor_route_measures_only_outbound_pcmu(tmp_path: Path) -> None:
+    cfg = replace(config(tmp_path), probe_receive_only=True)
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    active_pcmu = b"\xa0" * 160
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        token = _route_token(controller, role="monitor")
+        with client.websocket_connect(
+            f"/ws/monitor/{controller.run_id}",
+            headers={"x-telnyx-streaming-auth-token": token},
+        ) as ws:
+            ws.send_text(start_raw("route-call", encoding="PCMU", sample_rate=8_000))
+            ws.send_text(
+                probe_media_raw(
+                    sequence=2,
+                    track="outbound",
+                    chunk=1,
+                    timestamp=0,
+                    pcm16=active_pcmu,
+                )
+            )
+            ws.send_text(
+                probe_media_raw(
+                    sequence=3,
+                    track="inbound",
+                    chunk=1,
+                    timestamp=0,
+                    pcm16=b"\xff" * 156,
+                )
+            )
+            ws.send_text(json.dumps({"event": "stop", "sequence_number": "4"}))
+        for _ in range(1_000):
+            if not controller.monitor_socket_active:
+                break
+            time.sleep(0.001)
+        assert controller.failure is None
+        assert acoustic_probe.AGENT_CHANNEL in controller.media_ready_ns
+        assert controller.capture is not None
+        assert len(controller.capture.tracks[acoustic_probe.AGENT_CHANNEL]) == 640
+        assert controller.monitor_integrity is not None
+        assert not controller.monitor_integrity.ordering.unresolved
+        rows = [
+            json.loads(line)
+            for line in (controller.artifacts.path / "frame_metadata.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert [row["track"] for row in rows] == [
+            acoustic_probe.AGENT_CHANNEL,
+            "monitor_inbound_unmeasured",
+        ]
+        assert rows[0]["source_payload_bytes"] == 160
+        assert rows[0]["payload_bytes"] == 640
+        assert rows[1]["source_payload_bytes"] == 156
+
+
+def test_monitor_route_rejects_unexpected_outbound_frame_size(
+    tmp_path: Path,
+) -> None:
+    cfg = replace(config(tmp_path), probe_receive_only=True)
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        token = _route_token(controller, role="monitor")
+        with (
+            pytest.raises(WebSocketDisconnect),
+            client.websocket_connect(
+                f"/ws/monitor/{controller.run_id}",
+                headers={"x-telnyx-streaming-auth-token": token},
+            ) as ws,
+        ):
+            ws.send_text(start_raw("route-call", encoding="PCMU", sample_rate=8_000))
+            ws.send_text(
+                probe_media_raw(
+                    sequence=2,
+                    track="outbound",
+                    chunk=1,
+                    timestamp=0,
+                    pcm16=b"\xff" * 156,
+                )
+            )
+            ws.receive_text()
+        assert controller.failure == "media_format_mismatch"
+        events = (controller.artifacts.path / "events.jsonl").read_text()
+        assert '"media_frame_size_mismatch"' in events
+        assert '"monitor"' in events
+
+
+def test_receive_only_agent_socket_is_diagnostic_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = replace(config(tmp_path), probe_receive_only=True)
+    handled_audio: list[bytes] = []
+
+    class FakeMediaStream:
+        def __init__(self, ws: object, *, frame_ms: int, lead_frames: int) -> None:
+            self.on_error: object = None
+
+        def start(self) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            pass
+
+    class FakeVoiceAgent:
+        run_task: None = None
+
+        def __init__(self, *args: object) -> None:
+            self._on_socket_error = lambda: None
+
+        def set_call_info(self, call_id: str, from_number: str) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def handle_audio(self, pcm16: bytes) -> None:
+            handled_audio.append(pcm16)
+
+        def submit_speak_ended(self, generation: int | None) -> None:
+            pass
+
+        def submit_hangup(self) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr(acoustic_probe, "MediaStream", FakeMediaStream)
+    monkeypatch.setattr(acoustic_probe, "VoiceAgent", FakeVoiceAgent)
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        controller.bridge_ready.set()
+        controller.mark_media_ready(acoustic_probe.PROBE_CHANNEL, time.monotonic_ns())
+        # The monitor socket supplies channel B readiness in receive-only mode.
+        controller.mark_media_ready(acoustic_probe.AGENT_CHANNEL, time.monotonic_ns())
+        token = _route_token(controller, "leg-b-call", "agent")
+        with client.websocket_connect(
+            f"/ws/agent/{controller.run_id}",
+            headers={"x-telnyx-streaming-auth-token": token},
+        ) as ws:
+            ws.send_text(start_raw("leg-b-call"))
+            ws.send_text(
+                probe_media_raw(
+                    sequence=2,
+                    track="inbound",
+                    chunk=1,
+                    timestamp=0,
+                    pcm16=b"\x01\x00" * 320,
+                )
+            )
+            ws.send_text(json.dumps({"event": "stop", "sequence_number": "3"}))
+        for _ in range(1_000):
+            if not controller.agent_socket_active:
+                break
+            time.sleep(0.001)
+        assert controller.failure is None
+        assert controller.capture is not None
+        assert len(controller.capture.tracks[acoustic_probe.AGENT_CHANNEL]) == 0
+        assert handled_audio == [b"\x01\x00" * 320]
+        rows = [
+            json.loads(line)
+            for line in (controller.artifacts.path / "frame_metadata.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert rows[0]["track"] == "agent_inbound_unmeasured"
 
 
 @pytest.mark.parametrize(

@@ -416,6 +416,52 @@ provider `outbound`) and the fixture on channel B (agent-leg provider
 mirrored or recirculated activity remains a fail-closed result. No detector
 threshold, silence requirement, time bound, or promotion gate was changed.
 
+## Agent-leg receive-only monitor prepared offline
+
+Attempt 22 proved that the agent leg's bidirectional socket surfaces the
+websocket-injected greeting on its own provider-inbound track within about one
+millisecond of its delivery to the opposite leg. While channel B is sourced
+from that inbound track, the greeting window can never present exactly one
+active track, so the injection mirror is a structural disqualifier for the
+previous channel designation, not a transient provider fault.
+
+The accumulated live evidence constrains the correction. Provider-outbound
+tracks have delivered zero frames on every bidirectional socket that requested
+them: the agent socket in attempts 8 and 22, and the probe socket in attempts
+10 and 11. The only surface that has ever streamed a provider-outbound track
+is a receive-only stream — the probe leg's PCMU stream has done so
+continuously since attempt 15, including through silence, and in attempt 22 it
+carried the delivered greeting. Telnyx's published limit restricts a call to
+one bidirectional stream; it does not restrict an additional receive-only
+stream.
+
+The corrected topology therefore adds a third authenticated socket: a
+receive-only PCMU/8 kHz `both_tracks` monitor stream on the agent leg,
+started with the probe stream once the bridge exists. Measured channel B is
+now the monitor stream's provider-outbound track — the audio Telnyx delivers
+toward the agent leg — decoded with the same reviewed G.711 normalization and
+subject to the same exact 160-byte framing gate as channel A. The two measured
+channels become symmetric: each is a leg's receive-only provider-outbound
+track, meaning the audio that leg's party hears. Under `opposite`, the
+greeting and later response are expected only on channel A, and the delivered
+fixture only on channel B. The agent leg's bidirectional socket keeps feeding
+provider-inbound audio to the unchanged VoiceAgent and retains its exact L16
+gate, but both of its tracks are now diagnostic-only
+(`agent_inbound_unmeasured`/`agent_outbound_unmeasured`) and cannot enter
+promotion calculations. Monitor provider-inbound is likewise
+diagnostic-only. Monitor tokens are route/role-bound like the existing
+sockets, one monitor socket may be active, its ordering integrity joins the
+completion gate, and the manifest now records each measured channel's
+provider source. Acoustic roles are still proven jointly from waveform
+evidence; mirrored or recirculated activity remains fail-closed. No detector
+threshold, silence requirement, time bound, or promotion gate was changed.
+
+Openly recorded unknowns for the next bounded attempt: whether Telnyx accepts
+a second, receive-only stream on a leg that already carries the bidirectional
+stream (a rejection fails closed as `stream_start_failed`), and whether
+delivered fixture audio surfaces on the monitor's outbound track as the
+attempt-22 channel-A evidence predicts.
+
 ## Live attempt log
 
 - 2026-07-11, attempt 1: **NO-GO — `stream_start_failed`**. The call reached

@@ -42,7 +42,7 @@ class StreamAuthorization:
     token: str
     run_id: str
     call_control_id: str
-    role: Literal["probe", "agent"]
+    role: Literal["probe", "agent", "monitor"]
     expires_ns: int
 
 
@@ -59,7 +59,7 @@ class StreamTokenStore:
         self,
         run_id: str,
         call_control_id: str,
-        role: Literal["probe", "agent"],
+        role: Literal["probe", "agent", "monitor"],
         now_ns: int,
     ) -> str:
         self.remove_expired(now_ns)
@@ -78,7 +78,7 @@ class StreamTokenStore:
         presented: str,
         *,
         run_id: str,
-        role: Literal["probe", "agent"],
+        role: Literal["probe", "agent", "monitor"],
         now_ns: int,
     ) -> StreamAuthorization:
         self.remove_expired(now_ns)

@@ -91,6 +91,9 @@ FRAME_MS = 20
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
+# One 20 ms PCMU frame at 8 kHz: both measured receive-only channels share
+# this exact framing gate.
+PCMU_FRAME_BYTES = 160
 PACING_TOLERANCE_NS = 10_000_000
 AUTH_HANDSHAKE_TIMEOUT_SECONDS = 2.0
 FIXTURE_TOKEN_TTL_SECONDS = 15
@@ -564,9 +567,11 @@ class ProbeController:
         self.greeting_started_ns: int | None = None
         self.probe_socket_active = False
         self.agent_socket_active = False
+        self.monitor_socket_active = False
         self.capture: CrossLegCapture | None = None
         self.agent_integrity: BoundedCapture | None = None
         self.probe_integrity: BoundedCapture | None = None
+        self.monitor_integrity: BoundedCapture | None = None
         self.failure_waveforms_written = False
         self.probe_media_frames_received = 0
         self.states: list[ProbeState] = []
@@ -909,6 +914,13 @@ class ProbeController:
             if self.leg_a and "probe" not in self.streams_started:
                 self.streams_started.add("probe")
                 await self._start_stream(self.leg_a, role="probe")
+            if (
+                self.config.probe_receive_only
+                and self.leg_b
+                and "monitor" not in self.streams_started
+            ):
+                self.streams_started.add("monitor")
+                await self._start_stream(self.leg_b, role="monitor")
         elif (
             event_type == "call.hangup"
             and ccid in {self.leg_a, self.leg_b}
@@ -917,7 +929,7 @@ class ProbeController:
             self.fail("call_hangup")
 
     async def _start_stream(
-        self, ccid: str, *, role: Literal["probe", "agent"]
+        self, ccid: str, *, role: Literal["probe", "agent", "monitor"]
     ) -> None:
         route = role
         token = self.tokens.issue(self.run_id, ccid, route, self.clock.monotonic_ns())
@@ -928,7 +940,10 @@ class ProbeController:
             "stream_track": "both_tracks",
             "stream_auth_token": token,
         }
-        if role == "probe" and self.config.probe_receive_only:
+        # A monitor stream is receive-only by definition; only the probe leg
+        # ever legitimately toggles between the receive-only and legacy
+        # bidirectional payloads.
+        if role == "monitor" or (role == "probe" and self.config.probe_receive_only):
             payload["stream_codec"] = "PCMU"
         else:
             payload.update(
@@ -1036,12 +1051,38 @@ class ProbeController:
                 "sample_rate": SAMPLE_RATE,
                 "channels": CHANNELS,
             },
+            "measured_media_format": (
+                {
+                    "encoding": "PCMU",
+                    "sample_rate": 8_000,
+                    "channels": CHANNELS,
+                    "analysis_sample_rate": SAMPLE_RATE,
+                    "normalization": "g711_ulaw_zero_order_hold",
+                }
+                if self.config.probe_receive_only
+                else {
+                    "encoding": "L16",
+                    "sample_rate": SAMPLE_RATE,
+                    "channels": CHANNELS,
+                }
+            ),
             "greeting_tts_decode_mode": (
                 "streaming"
                 if self.config.settings.tts_streaming_decode
                 else "whole_buffer"
             ),
             "target_legs": self.config.target_legs,
+            "channel_sources": (
+                {
+                    PROBE_CHANNEL: "probe_leg_provider_outbound",
+                    AGENT_CHANNEL: "monitor_leg_b_provider_outbound",
+                }
+                if self.config.probe_receive_only
+                else {
+                    PROBE_CHANNEL: "probe_leg_provider_outbound",
+                    AGENT_CHANNEL: "agent_leg_provider_inbound",
+                }
+            ),
             "capture_limits": {
                 "call_seconds": self.config.call_seconds,
                 "capture_seconds": self.config.capture_seconds,
@@ -1059,7 +1100,7 @@ async def _authenticate_probe_socket(
     ws: WebSocket,
     controller: ProbeController,
     *,
-    role: Literal["probe", "agent"],
+    role: Literal["probe", "agent", "monitor"],
 ) -> tuple[StreamAuthorization, ConnectedFrame | None]:
     header_token = ws.headers.get("x-telnyx-streaming-auth-token", "")
     connected: ConnectedFrame | None = None
@@ -1875,7 +1916,7 @@ def create_app(
                         if (
                             config.probe_receive_only
                             and frame.track == "outbound"
-                            and len(frame.pcm16) != 160
+                            and len(frame.pcm16) != PCMU_FRAME_BYTES
                         ):
                             controller.artifacts.append_jsonl(
                                 "events.jsonl",
@@ -2426,6 +2467,13 @@ def create_app(
                 or probe_integrity.ordering.unresolved
                 or controller.agent_integrity is None
                 or controller.agent_integrity.ordering.unresolved
+                or (
+                    config.probe_receive_only
+                    and (
+                        controller.monitor_integrity is None
+                        or controller.monitor_integrity.ordering.unresolved
+                    )
+                )
             ):
                 raise ProbeProtocolError("media_ordering_anomaly")
             if agent_track is None:
@@ -2548,6 +2596,15 @@ def create_app(
                     "measurement_channels": asdict(capture.ordering.counts),
                     "agent_socket": asdict(controller.agent_integrity.ordering.counts),
                     "probe_socket": asdict(probe_integrity.ordering.counts),
+                    **(
+                        {
+                            "monitor_socket": asdict(
+                                controller.monitor_integrity.ordering.counts
+                            )
+                        }
+                        if controller.monitor_integrity is not None
+                        else {}
+                    ),
                 },
                 pacing={
                     "maximum_lateness_ns": pacing.maximum_lateness_ns
@@ -2612,6 +2669,153 @@ def create_app(
             await controller.hangup_both()
             controller.probe_socket_active = False
 
+    @app.websocket("/ws/monitor/{run_id}")
+    async def monitor_ws(ws: WebSocket, run_id: str) -> None:
+        """Receive-only agent-leg monitor supplying measured channel B.
+
+        The agent leg's bidirectional socket mirrors websocket-injected audio
+        on its inbound track, so channel B is taken from this separate
+        receive-only stream's provider outbound track: the audio Telnyx
+        delivers toward the agent leg.
+        """
+        controller: ProbeController = ws.app.state.controller
+        if not hmac.compare_digest(run_id, controller.run_id):
+            await ws.close(code=1008)
+            return
+        capture: CrossLegCapture | None = None
+        monitor_integrity: BoundedCapture | None = None
+        message_rows = 0
+        first_tracks_seen: set[str] = set()
+        if controller.monitor_socket_active:
+            await ws.close(code=1008)
+            return
+        controller.monitor_socket_active = True
+        try:
+            authorization, _ = await _authenticate_probe_socket(
+                ws, controller, role="monitor"
+            )
+            capture = controller.capture_after_authentication()
+            monitor_integrity = BoundedCapture(
+                max_bytes_per_track=MAX_CAPTURE_BYTES_PER_TRACK,
+                max_event_rows=MAX_EVENT_ROWS,
+            )
+            controller.monitor_integrity = monitor_integrity
+            async with asyncio.timeout(config.capture_seconds):
+                while True:
+                    raw = await ws.receive_text()
+                    message_rows += 1
+                    if message_rows > MAX_EVENT_ROWS:
+                        raise ProbeProtocolError("capture_limit_reached")
+                    event = decode_probe_message(
+                        raw, controller.clock.monotonic_ns()
+                    )
+                    if isinstance(event, ConnectedFrame):
+                        continue
+                    if isinstance(event, StartFrame):
+                        monitor_integrity.observe_non_media(event)
+                        validate_authorized_call_id(
+                            event.call_control_id, authorization.call_control_id
+                        )
+                        controller.artifacts.append_jsonl(
+                            "events.jsonl",
+                            {
+                                "event": "media_format_observed",
+                                "role": "monitor",
+                                "media_format": asdict(event.media_format),
+                                "host_monotonic_ns": (
+                                    event.host_receive_monotonic_ns
+                                ),
+                            },
+                        )
+                        validate_media_format(
+                            event.media_format,
+                            encoding="PCMU",
+                            sample_rate=8_000,
+                            channels=CHANNELS,
+                        )
+                        controller.mark_media_ready(
+                            AGENT_CHANNEL, event.host_receive_monotonic_ns
+                        )
+                    elif isinstance(event, MediaFrame):
+                        if (
+                            event.track == "outbound"
+                            and len(event.pcm16) != PCMU_FRAME_BYTES
+                        ):
+                            controller.artifacts.append_jsonl(
+                                "events.jsonl",
+                                {
+                                    "event": "media_frame_size_mismatch",
+                                    "role": "monitor",
+                                    "track": event.track,
+                                    "source_payload_bytes": len(event.pcm16),
+                                    "host_monotonic_ns": (
+                                        event.host_receive_monotonic_ns
+                                    ),
+                                },
+                            )
+                            raise ProbeProtocolError("media_format_mismatch")
+                        monitor_integrity.append(event)
+                        normalized = replace(
+                            event, pcm16=decode_pcmu_8k_to_pcm16_16k(event.pcm16)
+                        )
+                        measurement_channel = (
+                            AGENT_CHANNEL
+                            if event.track == "outbound"
+                            else "monitor_inbound_unmeasured"
+                        )
+                        if event.track == "outbound":
+                            capture.append(
+                                AGENT_CHANNEL,
+                                replace(normalized, sequence_number=event.chunk),
+                            )
+                        metadata = _frame_metadata(
+                            normalized, channel=measurement_channel
+                        )
+                        metadata["source_payload_bytes"] = len(event.pcm16)
+                        controller.artifacts.append_jsonl(
+                            "frame_metadata.jsonl", metadata
+                        )
+                        diagnostic_track = f"monitor_{event.track}"
+                        if diagnostic_track not in first_tracks_seen:
+                            first_tracks_seen.add(diagnostic_track)
+                            controller.artifacts.append_jsonl(
+                                "events.jsonl",
+                                {
+                                    "event": "first_frame_received_by_track",
+                                    "track": diagnostic_track,
+                                    "host_monotonic_ns": (
+                                        event.host_receive_monotonic_ns
+                                    ),
+                                },
+                            )
+                    elif isinstance(event, StopFrame):
+                        monitor_integrity.observe_non_media(event)
+                        break
+                    elif isinstance(event, ErrorFrame):
+                        monitor_integrity.observe_non_media(event)
+                        raise ProbeProtocolError("socket_error")
+                    else:
+                        monitor_integrity.observe_non_media(event)
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            # This socket supplies measured channel B: losing it mid-run is
+            # terminal, but the expected disconnect during post-completion
+            # teardown is not a failure.
+            if ProbeState.CAPTURE_COMPLETED not in controller.states:
+                controller.fail("socket_error")
+        except TimeoutError:
+            # The probe socket and watchdog own capture-window classification;
+            # the monitor window expiring adds no independent diagnosis and
+            # must not stamp the run with a generic category first.
+            pass
+        except ProbeProtocolError as exc:
+            controller.fail(exc.category)
+        except Exception:
+            controller.fail("socket_error")
+        finally:
+            controller.monitor_socket_active = False
+            with contextlib.suppress(Exception):
+                await ws.close()
+
     @app.websocket("/ws/agent/{run_id}")
     async def agent_ws(ws: WebSocket, run_id: str) -> None:
         controller: ProbeController = ws.app.state.controller
@@ -2665,17 +2869,29 @@ def create_app(
                         sample_rate=SAMPLE_RATE,
                         channels=CHANNELS,
                     )
-                    controller.mark_media_ready(
-                        AGENT_CHANNEL, event.host_receive_monotonic_ns
-                    )
+                    if not config.probe_receive_only:
+                        # In receive-only mode the agent-leg monitor socket
+                        # supplies channel B; this bidirectional socket's own
+                        # media is diagnostic-only because its inbound track
+                        # mirrors the websocket injection (attempt 22).
+                        controller.mark_media_ready(
+                            AGENT_CHANNEL, event.host_receive_monotonic_ns
+                        )
                     if agent is not None:
                         continue
                     try:
                         async with asyncio.timeout(STATE_TIMEOUT_SECONDS):
                             await controller.bridge_ready.wait()
-                            await controller.measurement_ready.wait()
                     except TimeoutError as exc:
                         raise ProbeProtocolError("bridge_failed") from exc
+                    # Measurement readiness depends on the measured-channel
+                    # streams (probe, and monitor in receive-only mode), so a
+                    # stall here is a stream failure, not a bridge failure.
+                    try:
+                        async with asyncio.timeout(STATE_TIMEOUT_SECONDS):
+                            await controller.measurement_ready.wait()
+                    except TimeoutError as exc:
+                        raise ProbeProtocolError("stream_start_failed") from exc
                     media = MediaStream(
                         ws,
                         frame_ms=FRAME_MS,
@@ -2696,13 +2912,16 @@ def create_app(
                     controller.agent = agent
                     agent.start()
                 elif isinstance(event, MediaFrame):
+                    measured = (
+                        not config.probe_receive_only and event.track == "inbound"
+                    )
                     measurement_channel = (
                         AGENT_CHANNEL
-                        if event.track == "inbound"
-                        else "agent_outbound_unmeasured"
+                        if measured
+                        else f"agent_{event.track}_unmeasured"
                     )
                     agent_integrity.append(event)
-                    if event.track == "inbound":
+                    if measured:
                         capture.append(
                             AGENT_CHANNEL,
                             replace(event, sequence_number=event.chunk),
