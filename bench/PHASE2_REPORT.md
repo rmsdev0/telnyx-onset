@@ -558,6 +558,20 @@ gate.
   intent while removing provider MP3 chunk boundaries from incremental decode;
   this does not claim waveform equivalence between the two operational paths.
   Production startup, thresholds, clocks, and acoustic gates remain unchanged.
+- 2026-07-12, authorized iterative attempt 21 (`target_legs=opposite`, revision
+  `929b7f7`): **NO-GO — `agent_audio_not_observed`**. Whole-buffer greeting
+  decode was provenance-recorded and produced a stable 154-frame injection, but
+  the returned agent channel never reached natural silence. Channel A remained
+  exact zero; channel B became clipped and repeated an exact two-second PCM
+  cycle through the greeting deadline. One-second blocks at seconds 9, 11, 13,
+  and later were byte-identical, as were the alternating blocks at seconds 10,
+  12, 14, and later, while provider chunk, sequence, and timestamp fields kept
+  advancing monotonically. This rules out local capture replay and makes the
+  Phase 2 natural-stop prerequisite impossible on the current provider topology.
+  No fixture URL was armed or served. Both legs were hung up, exact webhook
+  restoration was verified, and the tunnel was stopped. Further unchanged
+  retries are halted to avoid outcome fishing; the next step requires a Telnyx
+  media/topology correction or a separately reviewed benchmark redesign.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -595,6 +609,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized receive-only returned-greeting prerequisite retained.
 - [x] One authorized full-transport attempt retained.
 - [x] One authorized unchanged full-transport retry retained.
+- [x] One authorized whole-buffer full-transport retry retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.
