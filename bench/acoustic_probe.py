@@ -486,7 +486,9 @@ class ProbeController:
         self.greeting_started_ns: int | None = None
         self.probe_socket_active = False
         self.agent_socket_active = False
-        self.capture: BoundedCapture | None = None
+        self.capture: CrossLegCapture | None = None
+        self.agent_integrity: BoundedCapture | None = None
+        self.failure_waveforms_written = False
         self.probe_media_frames_received = 0
         self.states: list[ProbeState] = []
         self.failure: str | None = None
@@ -505,15 +507,48 @@ class ProbeController:
             {"event": "probe_started", "host_monotonic_ns": self.started_ns},
         )
 
-    def capture_after_authentication(self) -> BoundedCapture:
-        """Allocate the agent-socket two-track capture after authentication."""
+    def capture_after_authentication(self) -> CrossLegCapture:
+        """Allocate the isolated two-socket capture after authentication."""
         if self.capture is None:
-            self.capture = BoundedCapture(
-                tracks=(PROBE_CHANNEL, AGENT_CHANNEL),
-                max_bytes_per_track=MAX_CAPTURE_BYTES_PER_TRACK,
+            self.capture = CrossLegCapture(
+                (PROBE_CHANNEL, AGENT_CHANNEL),
+                max_bytes_per_channel=MAX_CAPTURE_BYTES_PER_TRACK,
                 max_event_rows=MAX_EVENT_ROWS,
             )
         return self.capture
+
+    def write_failure_waveforms(self) -> None:
+        """Retain bounded ignored PCM for diagnosis; never a promotion artifact."""
+        if (
+            self.failure is None
+            or self.capture is None
+            or self.failure_waveforms_written
+            or not {PROBE_CHANNEL, AGENT_CHANNEL} <= self.media_ready_ns.keys()
+        ):
+            return
+        self.failure_waveforms_written = True
+        sizes: dict[str, int] = {}
+        write_failed = False
+        for channel, data in self.capture.tracks.items():
+            if not data:
+                continue
+            try:
+                _write_track_wav(
+                    self.artifacts.path / f"diagnostic_{channel}.wav", bytes(data)
+                )
+            except OSError:
+                write_failed = True
+            else:
+                sizes[channel] = len(data)
+        self.artifacts.append_jsonl(
+            "events.jsonl",
+            {
+                "event": "diagnostic_waveforms_written",
+                "channels": sizes,
+                "write_failed": write_failed,
+                "host_monotonic_ns": self.clock.monotonic_ns(),
+            },
+        )
 
     def mark_media_ready(self, channel: str, receive_ns: int) -> None:
         """Publish the common start only after both authenticated starts arrive."""
@@ -1369,12 +1404,24 @@ def _first_active_sample(
 
 
 def _write_track_wav(path: Path, pcm16: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "wb") as raw, wave.open(raw, "wb") as target:
-        target.setnchannels(CHANNELS)
-        target.setsampwidth(SAMPLE_WIDTH)
-        target.setframerate(SAMPLE_RATE)
-        target.writeframes(pcm16)
+    temporary = path.with_name(f".{path.name}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as raw:
+            with wave.open(raw, "wb") as target:
+                target.setnchannels(CHANNELS)
+                target.setsampwidth(SAMPLE_WIDTH)
+                target.setframerate(SAMPLE_RATE)
+                target.writeframes(pcm16)
+            raw.flush()
+            os.fsync(raw.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
 
 
 def create_app(
@@ -1447,7 +1494,7 @@ def create_app(
         if not hmac.compare_digest(run_id, controller.run_id):
             await ws.close(code=1008)
             return
-        capture: BoundedCapture | None = None
+        capture: CrossLegCapture | None = None
         probe_integrity: BoundedCapture | None = None
         pacing: PacingSummary | None = None
         agent_track: str | None = None
@@ -1528,6 +1575,10 @@ def create_app(
                         continue
                     if isinstance(frame, MediaFrame):
                         probe_integrity.append(frame)
+                        capture.append(
+                            PROBE_CHANNEL,
+                            replace(frame, sequence_number=frame.chunk),
+                        )
                         probe_media_frames += 1
                         controller.probe_media_frames_received = probe_media_frames
                         controller.artifacts.append_jsonl(
@@ -1964,7 +2015,12 @@ def create_app(
                     else:
                         probe_integrity.observe_non_media(frame)
 
-            if capture.ordering.unresolved or probe_integrity.ordering.unresolved:
+            if (
+                capture.ordering.unresolved
+                or probe_integrity.ordering.unresolved
+                or controller.agent_integrity is None
+                or controller.agent_integrity.ordering.unresolved
+            ):
                 raise ProbeProtocolError("media_ordering_anomaly")
             if agent_track is None:
                 raise ProbeProtocolError("agent_audio_not_observed")
@@ -2083,7 +2139,10 @@ def create_app(
                 },
                 contamination=asdict(contamination),
                 ordering_anomalies={
-                    "agent_socket": asdict(capture.ordering.counts),
+                    "measurement_channels": asdict(capture.ordering.counts),
+                    "agent_socket": asdict(
+                        controller.agent_integrity.ordering.counts
+                    ),
                     "probe_socket": asdict(probe_integrity.ordering.counts),
                 },
                 pacing={
@@ -2138,6 +2197,8 @@ def create_app(
                         controller.fail("stimulus_send_failed")
             with contextlib.suppress(Exception):
                 await ws.close()
+            with contextlib.suppress(Exception):
+                controller.write_failure_waveforms()
             await controller.hangup_both()
             controller.probe_socket_active = False
 
@@ -2149,7 +2210,8 @@ def create_app(
             return
         agent: VoiceAgent | None = None
         media: MediaStream | None = None
-        capture: BoundedCapture | None = None
+        capture: CrossLegCapture | None = None
+        agent_integrity: BoundedCapture | None = None
         message_rows = 0
         if controller.agent_socket_active:
             await ws.close(code=1008)
@@ -2160,6 +2222,11 @@ def create_app(
                 ws, controller, role="agent"
             )
             capture = controller.capture_after_authentication()
+            agent_integrity = BoundedCapture(
+                max_bytes_per_track=MAX_CAPTURE_BYTES_PER_TRACK,
+                max_event_rows=MAX_EVENT_ROWS,
+            )
+            controller.agent_integrity = agent_integrity
             while True:
                 raw = await ws.receive_text()
                 message_rows += 1
@@ -2169,7 +2236,7 @@ def create_app(
                 if isinstance(event, ConnectedFrame):
                     continue
                 if isinstance(event, StartFrame):
-                    capture.observe_non_media(event)
+                    agent_integrity.observe_non_media(event)
                     validate_authorized_call_id(
                         event.call_control_id, authorization.call_control_id
                     )
@@ -2211,9 +2278,16 @@ def create_app(
                     agent.start()
                 elif isinstance(event, MediaFrame):
                     measurement_channel = (
-                        AGENT_CHANNEL if event.track == "inbound" else PROBE_CHANNEL
+                        AGENT_CHANNEL
+                        if event.track == "inbound"
+                        else "agent_outbound_unmeasured"
                     )
-                    capture.append(replace(event, track=measurement_channel))
+                    agent_integrity.append(event)
+                    if event.track == "inbound":
+                        capture.append(
+                            AGENT_CHANNEL,
+                            replace(event, sequence_number=event.chunk),
+                        )
                     controller.artifacts.append_jsonl(
                         "frame_metadata.jsonl",
                         _frame_metadata(event, channel=measurement_channel),
@@ -2221,7 +2295,7 @@ def create_app(
                     if agent is not None and event.track == "inbound":
                         agent.handle_audio(event.pcm16)
                 elif isinstance(event, MarkFrame):
-                    capture.observe_non_media(event)
+                    agent_integrity.observe_non_media(event)
                     if agent is None:
                         continue
                     name = event.name
@@ -2232,13 +2306,13 @@ def create_app(
                     )
                     agent.submit_speak_ended(generation)
                 elif isinstance(event, StopFrame):
-                    capture.observe_non_media(event)
+                    agent_integrity.observe_non_media(event)
                     break
                 elif isinstance(event, ErrorFrame):
-                    capture.observe_non_media(event)
+                    agent_integrity.observe_non_media(event)
                     raise ProbeProtocolError("socket_error")
                 elif isinstance(event, DtmfFrame):
-                    capture.observe_non_media(event)
+                    agent_integrity.observe_non_media(event)
                     continue
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass

@@ -12,6 +12,10 @@ greeting-track selection. A sixth diagnostic run reached greeting selection and
 fixture transmission, but proved that pre-greeting setup audio had been selected
 before the actual VoiceAgent greeting completed. A seventh causal-gated run then
 proved that neither inbound-only leg stream carries a valid returned greeting.
+An eighth run proved that `both_tracks` does not return WebSocket-injected audio
+on the agent socket's provider-outbound track under this topology. It did,
+however, expose causal post-greeting activity on the independently streamed
+probe leg, leaving one cross-leg/`both_tracks` combination untested.
 No fixture match, manual waveform review, detector calibration, or empirical GO
 was produced. Phase 3 remains blocked.
 
@@ -21,6 +25,8 @@ was produced. Phase 3 remains blocked.
 - Live-probe revision after attempt-1 correction:
   `24e0b74` (`Defer probe stream until bridge readiness`)
 - Dual-socket live revision: `e72c839` (`Align Phase 2 cross-leg media capture`)
+- Agent-`both_tracks` live revision: `4b3f6fb`
+  (`Capture both agent-leg media tracks`)
 - Branch: `duplex`
 - Methodology authority: `BENCHMARK_PLAN.md`, unchanged
 - Production runtime modules modified: none
@@ -121,9 +127,13 @@ manifest with a named category, sanitized terminal outcome, attempt number, and
 teardown result. Tokens, phone numbers, provider IDs, transcripts, raw error
 bodies, and authorization values are excluded.
 
-Future sanitized frame metadata also records per-frame RMS dBFS, peak absolute
-level, and clipping count. This permits failed-run acoustic diagnosis without
-persisting PCM, WAV audio, transcripts, or content.
+Sanitized frame metadata records per-frame RMS dBFS, peak absolute level, and
+clipping count. For the final authorized synthetic diagnostic only, exact
+bounded channel PCM may also be written as neutral-name WAVs after both
+authenticated sockets pass call binding and L16/16 kHz/mono validation. These
+ignored local 0600 files are diagnostic evidence, never committed or sufficient
+for promotion; persistence is atomic, no-follow, best-effort, and cannot block
+call teardown. No transcripts are retained.
 
 The live artifact root is anchored to the module repository at
 `bench/artifacts`, must resolve under the repository's `bench` directory, and
@@ -192,11 +202,12 @@ candidate analysis, the explicit horizon, Window A, and final summary all begin
 at the first VoiceAgent audio frame while production modules remain unchanged.
 
 An independent review of the seventh call confirmed empirical **NO-GO** and
-returned **GO** for the offline agent-leg `both_tracks` topology. It verified the
-single agent-socket ordering domain, neutral track mapping, inbound-only
-VoiceAgent feed, independent probe ordering, and continued fail-closed role
-proof. Whether Telnyx forks injected output onto agent outbound remains a live
-unknown.
+returned **GO** for the offline agent-leg `both_tracks` topology. The eighth
+call then rejected its agent-outbound hypothesis. A follow-up independent
+review confirmed that combining agent `both_tracks/self` routing with the two
+isolated inbound leg captures remains a distinct, plan-compatible topology:
+provider-outbound media is diagnostic only, agent inbound alone feeds the
+VoiceAgent, and acoustic roles must still be proven jointly and fail closed.
 
 ## Manual review procedure
 
@@ -249,6 +260,12 @@ This is waveform agreement validation, not a human-perception measurement.
   longest active run was two frames—below the five-frame/100 ms arm. It failed
   `agent_audio_not_observed`. This establishes that inbound-only streams cannot
   supply the returned VoiceAgent track under this topology.
+- The agent-`both_tracks` run delivered zero provider-outbound frames. After
+  causal greeting start, the probe socket was active in all 760 of 760 frames,
+  beginning 9.678 ms later; agent provider-inbound was active in 384 and quiet
+  in 384 of 768 frames. The persistent probe activity is a hypothesis, not role
+  proof: the combined diagnostic must reject it if no natural acoustic stop or
+  independent channel separation exists.
 - Stable track separation and track-to-leg orientation remain unproven because
   the fourth and fifth calls ended before fixture transmission and the sixth
   selected setup audio rather than the real greeting.
@@ -261,20 +278,22 @@ This is waveform agreement validation, not a human-perception measurement.
 
 ## Post-NO-GO topology correction prepared offline
 
-The inbound-only dual-socket hypothesis is now empirically rejected. The next
-offline topology requests Telnyx's documented `both_tracks` mode on the agent
-leg and uses its single authenticated WebSocket as the measurement source:
+The inbound-only dual-socket hypothesis and the agent-socket outbound hypothesis
+are empirically rejected. The remaining topology requests Telnyx's documented
+`both_tracks` mode on the agent leg, but measures the two authenticated inbound
+leg sockets:
 
-- neutral channel A: provider `outbound` media from the agent socket;
-- neutral channel B: provider `inbound` media from the same socket.
+- neutral channel A: provider `inbound` media from the probe-leg socket;
+- neutral channel B: provider `inbound` media from the agent-leg socket.
 
-The provider labels are used only to separate frames and to ensure that only
-inbound audio is fed to the unchanged VoiceAgent. Agent/stimulus roles are still
+The provider labels are used only to ensure that agent provider-inbound audio
+alone is fed to the unchanged VoiceAgent. Agent provider-outbound events remain
+in socket-integrity diagnostics but are excluded from acoustic measurement.
+Agent/stimulus roles are still
 proven jointly by greeting activity, silence, fixture correlation, and
 post-stimulus response; no role is inferred from `inbound` or `outbound`. The
-agent socket uses one global sequence tracker with track-local chunk/timestamp
-state. The probe socket remains inbound-only, has independent ordering, performs
-fixture injection, and is excluded from acoustic analysis.
+two sockets retain independent ordering domains. The probe socket remains
+inbound-only and performs fixture injection.
 
 Every Window A-D boundary remains defined once in process monotonic time and
 mapped separately to the first frame at or after that boundary on each neutral
@@ -300,12 +319,12 @@ pre-registered allowance for an isolated returned-agent channel plus a stimulus
 reference, not a change to the metric, detector gate, eligibility rules, or
 comparative conditions.
 
-An independent final re-review on 2026-07-11 returned **GO for the offline
-dual-socket topology correction**. It cleared the exclusive fixture endpoint,
-absolute and cross-channel timing bounds, minimum acoustic silence duration,
-simultaneous routes, ordering, teardown, privacy, and production isolation.
-
-Any new bounded live run still requires a fresh explicit authorization. The
+The original dual-socket correction was independently cleared on 2026-07-11.
+On 2026-07-12, a follow-up independent review cleared the combined
+cross-leg/`both_tracks` diagnostic subject to the same exclusive fixture
+endpoint, absolute and cross-channel timing bounds, minimum acoustic silence,
+independent socket ordering, teardown, privacy, and production-isolation gates.
+The user has explicitly authorized iterative bounded test/fix calls. The
 existing empirical verdict remains **NO-GO** until new evidence clears every
 gate.
 
@@ -358,6 +377,16 @@ gate.
   the inbound-only measurement topology. The agent-leg `both_tracks` hypothesis
   was prepared offline; whether Telnyx forks WebSocket-injected output back onto
   that stream's outbound track remains explicitly unproven.
+- 2026-07-12, authorized iterative attempt 8 (`target_legs=opposite`, revision
+  `4b3f6fb`): **NO-GO — `agent_audio_not_observed`**. Telnyx accepted
+  `both_tracks`; the agent socket delivered 1,124 provider-inbound frames and
+  zero provider-outbound frames, while the probe socket delivered 1,070 frames.
+  The full causal 15-second greeting horizon elapsed before failure and both
+  legs were hung up. This rejects the agent-socket outbound hypothesis for this
+  revision/account/topology, not Telnyx media streaming universally. The probe
+  socket's immediate post-greeting activity motivates the final bounded
+  cross-leg/`both_tracks` diagnostic; persistent or mirrored activity remains a
+  fail-closed result.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Failed runs produced sanitized metadata only; no mapped
@@ -381,6 +410,7 @@ track WAVs, comparative results, or measurement profile were produced.
 - [x] One separately authorized corrected dual-socket retry retained.
 - [x] One authorized iterative diagnostic fixture attempt retained.
 - [x] One authorized causal-greeting inbound-topology attempt retained.
+- [x] One authorized agent-`both_tracks` topology attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

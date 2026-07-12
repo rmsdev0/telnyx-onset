@@ -326,6 +326,42 @@ async def test_watchdog_resets_full_horizon_at_first_greeting_audio(
     assert controller.failure == "agent_audio_not_observed"
 
 
+def test_failure_waveforms_require_both_validated_channels_and_are_bounded(
+    tmp_path: Path,
+) -> None:
+    cfg = config(tmp_path)
+    controller = ProbeController(
+        cfg, cast("SafeCallControl", FakeCallControl(cfg.settings))
+    )
+    capture = controller.capture_after_authentication()
+    pcm = array("h", [1_000] * 320).tobytes()
+    for sequence, channel in enumerate(
+        (acoustic_probe.PROBE_CHANNEL, acoustic_probe.AGENT_CHANNEL), start=2
+    ):
+        capture.append(
+            channel,
+            MediaFrame(sequence, channel, "inbound", 1, 0, pcm, sequence),
+        )
+    controller.fail("agent_audio_not_observed")
+    controller.write_failure_waveforms()
+    assert not list(controller.artifacts.path.glob("diagnostic_*.wav"))
+
+    controller.mark_media_ready(acoustic_probe.PROBE_CHANNEL, 1)
+    controller.mark_media_ready(acoustic_probe.AGENT_CHANNEL, 2)
+    controller.write_failure_waveforms()
+    controller.write_failure_waveforms()
+    paths = sorted(controller.artifacts.path.glob("diagnostic_*.wav"))
+    assert [path.name for path in paths] == [
+        "diagnostic_channel_a.wav",
+        "diagnostic_channel_b.wav",
+    ]
+    for path in paths:
+        assert os.stat(path).st_mode & 0o777 == 0o600
+        with wave.open(str(path), "rb") as source:
+            assert source.getparams()[:4] == (1, 2, 16_000, 320)
+            assert source.readframes(320) == pcm
+
+
 @pytest.mark.asyncio
 async def test_greeting_media_adapter_marks_only_first_audio_frame() -> None:
     calls: list[str] = []
@@ -696,29 +732,23 @@ def send_cross_leg_pair(
     controller.mark_media_ready(acoustic_probe.AGENT_CHANNEL, time.monotonic_ns())
     controller.mark_greeting_started()
     state["agent_chunk"] += 1
-    capture.append(
-        MediaFrame(
-            state["agent_sequence"],
-            "agent-stream",
-            acoustic_probe.AGENT_CHANNEL,
-            state["agent_chunk"],
-            (state["agent_chunk"] - 1) * 20,
-            reference_pcm,
-            time.monotonic_ns(),
-        ),
+    agent_frame = MediaFrame(
+        state["agent_sequence"],
+        "agent-stream",
+        "inbound",
+        state["agent_chunk"],
+        (state["agent_chunk"] - 1) * 20,
+        reference_pcm,
+        time.monotonic_ns(),
     )
-    state["agent_sequence"] += 1
-    state["output_chunk"] = state.get("output_chunk", 0) + 1
-    capture.append(
-        MediaFrame(
-            state["agent_sequence"],
-            "agent-stream",
-            acoustic_probe.PROBE_CHANNEL,
-            state["output_chunk"],
-            (state["output_chunk"] - 1) * 20,
-            probe_pcm,
-            time.monotonic_ns(),
+    if controller.agent_integrity is None:
+        controller.agent_integrity = BoundedCapture(
+            max_bytes_per_track=1_000_000, max_event_rows=1_000
         )
+    controller.agent_integrity.append(agent_frame)
+    capture.append(
+        acoustic_probe.AGENT_CHANNEL,
+        agent_frame,
     )
     state["agent_sequence"] += 1
     state["probe_chunk"] += 1
@@ -1275,6 +1305,33 @@ def test_probe_and_agent_routes_capture_concurrently(
                     pcm16=b"\x01\x00" * 320,
                 )
             )
+            agent_ws.send_text(
+                probe_media_raw(
+                    sequence=4,
+                    track="outbound",
+                    chunk=2,
+                    timestamp=20,
+                    pcm16=b"\x04\x00" * 320,
+                )
+            )
+            agent_ws.send_text(
+                probe_media_raw(
+                    sequence=5,
+                    track="inbound",
+                    chunk=2,
+                    timestamp=20,
+                    pcm16=b"\x05\x00" * 320,
+                )
+            )
+            agent_ws.send_text(
+                json.dumps(
+                    {
+                        "event": "mark",
+                        "sequence_number": "6",
+                        "mark": {"name": "diagnostic"},
+                    }
+                )
+            )
             probe_ws.send_text(
                 probe_media_raw(
                     sequence=2,
@@ -1284,9 +1341,16 @@ def test_probe_and_agent_routes_capture_concurrently(
                     pcm16=b"\x02\x00" * 320,
                 )
             )
+            agent_ws.send_text(
+                json.dumps({"event": "stop", "sequence_number": "7"})
+            )
             for _ in range(1_000):
                 capture = controller.capture
-                if capture is not None and all(capture.tracks.values()):
+                if (
+                    capture is not None
+                    and all(capture.tracks.values())
+                    and len(handled_audio) == 2
+                ):
                     break
                 time.sleep(0.001)
             else:
@@ -1294,12 +1358,17 @@ def test_probe_and_agent_routes_capture_concurrently(
             assert controller.measurement_ready.is_set()
             assert controller.measurement_start_ns is not None
             assert bytes(capture.tracks[acoustic_probe.AGENT_CHANNEL]) == (
-                b"\x01\x00" * 320
+                b"\x01\x00" * 320 + b"\x05\x00" * 320
             )
             assert bytes(capture.tracks[acoustic_probe.PROBE_CHANNEL]) == (
-                b"\x03\x00" * 320
+                b"\x02\x00" * 320
             )
-            assert handled_audio == [b"\x01\x00" * 320]
+            assert handled_audio == [b"\x01\x00" * 320, b"\x05\x00" * 320]
+            with pytest.raises(WebSocketDisconnect):
+                agent_ws.receive_text()
+            assert controller.agent_integrity is not None
+            assert not controller.agent_integrity.ordering.unresolved
+            assert not capture.ordering.unresolved
 
 
 def test_probe_route_capture_limit_is_named_and_terminal(
@@ -1331,6 +1400,49 @@ def test_probe_route_capture_limit_is_named_and_terminal(
             )
             ws.receive_text()
         assert controller.failure == "capture_limit_reached"
+
+
+def test_failure_waveform_error_cannot_block_probe_teardown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(tmp_path)
+    fake = FakeCallControl(cfg.settings)
+    app = create_app(cfg, cast("SafeCallControl", fake))
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        controller.leg_a = "memory-leg-a"
+        controller.leg_b = "memory-leg-b"
+        controller.bridge_ready.set()
+        token = _route_token(controller)
+
+        def fail_write() -> None:
+            raise OSError("simulated diagnostic disk failure")
+
+        monkeypatch.setattr(controller, "write_failure_waveforms", fail_write)
+        with (
+            pytest.raises(WebSocketDisconnect),
+            client.websocket_connect(
+                f"/ws/probe/{controller.run_id}",
+                headers={"x-telnyx-streaming-auth-token": token},
+            ) as ws,
+        ):
+            ws.send_text(start_raw("route-call"))
+            ws.send_text(
+                json.dumps(
+                    {
+                        "event": "error",
+                        "sequence_number": "2",
+                        "payload": {"code": 1, "title": "safe"},
+                    }
+                )
+            )
+            ws.receive_text()
+        assert not controller.probe_socket_active
+        assert controller.teardown_result == "both_legs_hung_up"
+        assert {(ccid, action) for ccid, action, _ in fake.actions} >= {
+            ("memory-leg-a", "hangup"),
+            ("memory-leg-b", "hangup"),
+        }
 
 
 def test_live_preflight_checks_directory_form_of_anchored_artifact_root(
@@ -1511,6 +1623,38 @@ def test_host_alignment_ignores_asymmetric_channel_prefixes() -> None:
         capture, DetectorConfig(), start_ns=base
     )
     assert candidate == acoustic_probe.PROBE_CHANNEL
+    assert not ambiguous
+
+
+def test_continuously_active_probe_leg_never_establishes_natural_stop() -> None:
+    capture = CrossLegCapture(
+        (acoustic_probe.PROBE_CHANNEL, acoustic_probe.AGENT_CHANNEL),
+        max_bytes_per_channel=1_000_000,
+        max_event_rows=2_000,
+    )
+    active = array("h", [8_000] * 320).tobytes()
+    silence = b"\x00\x00" * 320
+    for index in range(750):
+        for channel, payload in (
+            (acoustic_probe.PROBE_CHANNEL, active),
+            (acoustic_probe.AGENT_CHANNEL, silence),
+        ):
+            capture.append(
+                channel,
+                MediaFrame(
+                    index + 1,
+                    channel,
+                    "inbound",
+                    index + 1,
+                    index * 20,
+                    payload,
+                    1_000_000_000 + index * 20_000_000,
+                ),
+            )
+    candidate, _, ambiguous = acoustic_probe._candidate_agent_track(
+        capture, DetectorConfig(), start_ns=1_000_000_000
+    )
+    assert candidate is None
     assert not ambiguous
 
 
