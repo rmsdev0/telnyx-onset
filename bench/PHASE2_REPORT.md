@@ -2,16 +2,20 @@
 
 ## Verdict
 
-**CONDITIONAL GO**
+**NO-GO**
 
-The offline remediation is implemented and tested. This is not empirical GO.
-No live probe, call, tunnel, manual waveform review, or detector calibration was
-run. Phase 3 remains blocked until a separately authorized live validation and
-independent review satisfy every remaining gate below.
+The offline remediation is implemented and tested, but the bounded live probe
+could not expose the two stable tracks required by the preregistered acoustic
+boundary. Three authorized attempts were run and retained. Neither explicit
+target-leg setting produced a second returned track, so no track mapping,
+fixture match, manual waveform review, detector calibration, or empirical GO
+was possible. Phase 3 is blocked.
 
 ## Repository and scope
 
 - Remediation base: `b861afdfe22201474a018a778803d9451d5c6c14`
+- Live-probe revision after attempt-1 correction:
+  `24e0b74` (`Defer probe stream until bridge readiness`)
 - Branch: `duplex`
 - Methodology authority: `BENCHMARK_PLAN.md`, unchanged
 - Production runtime modules modified: none
@@ -153,6 +157,12 @@ correctness, security, privacy, or async-lifecycle blocker found.
 This review is not the later independent review of live waveform, calibration,
 and track-separation evidence. It does not promote Phase 2 to empirical GO.
 
+An independent sanitized-evidence review was completed after the third live
+attempt. It confirmed **NO-GO**: the single-track captures cannot establish the
+required fixture-reference mapping or acoustic boundary, the attempt cap is
+exhausted, `measurement_profile.json` must remain absent, and Phase 3 remains
+blocked. The reviewer inspected no audio, provider identifiers, or secrets.
+
 ## Manual review procedure
 
 After a separately authorized live run, inspect only its ignored local run
@@ -168,10 +178,12 @@ directory:
 
 This is waveform agreement validation, not a human-perception measurement.
 
-## Remaining live unknowns
+## Live findings and remaining unknowns
 
-- Actual `self`/`opposite` behavior and track-to-leg orientation.
-- Stability and separation of both returned tracks.
+- `target_legs=opposite` produced 2,859 frames, all labeled `inbound`.
+- `target_legs=self` produced 2,834 frames, all labeled `inbound`.
+- A second returned track was absent under both explicit settings, so stable
+  track separation and track-to-leg orientation could not be established.
 - Negotiated media format, framing, jitter, gaps, and ordering.
 - Returned-fixture correlation under the live topology.
 - Cross-feed and overlap behavior.
@@ -187,6 +199,18 @@ This is waveform agreement validation, not a human-perception measurement.
   requested `target_legs=opposite` before receiving `call.bridged`; the repaired
   workflow now starts that probe stream only after the bridge exists. No audio,
   comparative result, or measurement profile was produced by this attempt.
+- 2026-07-11, attempt 2 (`target_legs=opposite`): **NO-GO — `call_hangup`**.
+  Both media sockets and the expected L16/16 kHz format were reached, but all
+  2,859 captured frame-metadata rows carried only the `inbound` track label.
+  The hard call cap ended the attempt and both legs were hung up.
+- 2026-07-11, attempt 3 (`target_legs=self`): **NO-GO — `call_hangup`**.
+  The alternative target setting again reached media, but all 2,834 frame rows
+  carried only the `inbound` track label. The hard cap ended the attempt and
+  both legs were hung up.
+
+The maximum-three-attempt policy is exhausted. Failed runs produced sanitized
+metadata only; no mapped track WAVs, comparative results, or measurement profile
+were produced.
 
 ## Gate checklist
 
@@ -201,11 +225,11 @@ This is waveform agreement validation, not a human-perception measurement.
 - [x] Repository-anchored artifact path.
 - [x] Finite calibration evaluation support without auto-selection.
 - [x] Offline route/component/adversarial tests.
-- [ ] Separately authorized live capture.
+- [x] Three separately authorized bounded live attempts retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
-- [ ] Stable live format and track separation.
-- [ ] Independent review of live evidence and final Phase 2 boundary.
+- [ ] Stable two-track live capture and separation.
+- [x] Independent sanitized-evidence review confirms empirical NO-GO.
 
 Phase 3 must not begin while any item remains unchecked. A live failure is
 `NO-GO`, not permission to weaken the endpoint. `measurement_profile.json` may
