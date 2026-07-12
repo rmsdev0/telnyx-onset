@@ -437,7 +437,7 @@ async def test_controller_owns_leg_a_routes_leg_b_and_bridges(tmp_path: Path) ->
     assert probe_payload["stream_track"] == "both_tracks"
     assert probe_payload["stream_bidirectional_target_legs"] == "opposite"
     assert agent_payload["stream_track"] == "both_tracks"
-    assert agent_payload["stream_bidirectional_target_legs"] == "self"
+    assert agent_payload["stream_bidirectional_target_legs"] == "opposite"
     assert "token=" not in str(probe_payload["stream_url"])
     assert "stream_auth_token" in probe_payload
     bridges = [item for item in fake.actions if item[1] == "bridge"]
@@ -482,6 +482,7 @@ async def test_receive_only_probe_omits_all_bidirectional_options(
     assert probe_payload["stream_codec"] == "PCMU"
     assert not any(key.startswith("stream_bidirectional") for key in probe_payload)
     assert agent_payload["stream_bidirectional_mode"] == "rtp"
+    assert agent_payload["stream_bidirectional_target_legs"] == cfg.target_legs
 
 
 @pytest.mark.asyncio

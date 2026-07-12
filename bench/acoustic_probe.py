@@ -936,9 +936,11 @@ class ProbeController:
                     "stream_bidirectional_mode": "rtp",
                     "stream_bidirectional_codec": "L16",
                     "stream_bidirectional_sampling_rate": SAMPLE_RATE,
-                    "stream_bidirectional_target_legs": (
-                        self.config.target_legs if role == "probe" else "self"
-                    ),
+                    # On this bridged topology "self" recirculates injected
+                    # audio into the leg's own inbound track (attempt 21), so
+                    # the target is the explicit --target-legs selection, not
+                    # the production single-leg "self" default.
+                    "stream_bidirectional_target_legs": self.config.target_legs,
                 }
             )
         try:
@@ -2817,7 +2819,15 @@ def main() -> None:
         "--live", action="store_true", help="allow one bounded live attempt"
     )
     parser.add_argument("--fixture", type=Path)
-    parser.add_argument("--target-legs", choices=("self", "opposite"))
+    parser.add_argument(
+        "--target-legs",
+        choices=("self", "opposite"),
+        help=(
+            "agent-leg bidirectional stream target; 'self' recirculates the "
+            "agent's injected audio on the bridged bench call (attempt 21) "
+            "and 'opposite' delivers it to the measured harness leg"
+        ),
+    )
     arguments = parser.parse_args()
     if not arguments.live:
         print("offline safety gate: no call placed; run the offline test suite")

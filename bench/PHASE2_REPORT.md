@@ -389,6 +389,33 @@ The user has explicitly authorized iterative bounded test/fix calls. The
 existing empirical verdict remains **NO-GO** until new evidence clears every
 gate.
 
+## Bidirectional target-leg determination prepared offline
+
+Attempt 21 left one open provider question: whether the agent leg's
+bidirectional target of `self` can recirculate injected media on a bridged
+call. The Telnyx Call Commands API reference (Dial) answers it directly. It
+documents `stream_bidirectional_target_legs` as "Specifies which call legs
+should receive the bidirectional stream audio," with allowed values `both`,
+`self`, and `opposite` and a default of `opposite`. Under that definition,
+`self` on the bridged bench topology plays the agent's injected greeting back
+to the agent leg itself — consistent with attempt 21's loud, replayed channel
+B and exact-zero channel A — and never delivers it to the bridged harness leg.
+`opposite`, the provider default, is the documented value that delivers
+injected audio to the bridged peer, which is the leg the probe measures.
+
+The production runtime keeps `self` unchanged: a single answered inbound call
+has no opposite leg, which is why `onset/settings.py` overrides the provider
+default there. That rationale does not apply to the bridged bench call. The
+bench agent-leg stream now takes its bidirectional target from the explicit
+`--target-legs` selection instead of hardcoding `self`; the value was already
+recorded in the run manifest and now governs the agent leg. Exact-payload
+tests were updated to pin the new agent-leg value. Under `opposite`, the
+returned greeting and later response are expected on channel A (probe-leg
+provider `outbound`) and the fixture on channel B (agent-leg provider
+`inbound`); acoustic roles are still proven jointly from the waveforms, and
+mirrored or recirculated activity remains a fail-closed result. No detector
+threshold, silence requirement, time bound, or promotion gate was changed.
+
 ## Live attempt log
 
 - 2026-07-11, attempt 1: **NO-GO — `stream_start_failed`**. The call reached
