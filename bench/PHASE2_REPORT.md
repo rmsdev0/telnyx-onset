@@ -463,10 +463,33 @@ threshold, silence requirement, time bound, or promotion gate was changed.
 
 Attempt 23 resolved the first open unknown: Telnyx accepts the second,
 receive-only stream on a leg that already carries the bidirectional stream,
-and its authenticated start arrived normally. The remaining unknowns for the
-next bounded attempt are whether delivered fixture audio surfaces on the
-monitor's outbound track as the attempt-22 channel-A evidence predicts, and
-whether that track supplies frame coverage outside active delivery.
+and its authenticated start arrived normally. Attempt 24 then resolved the
+coverage unknown against this topology as-built: the monitor's outbound track
+delivered zero frames because the Call Control-answered harness endpoint
+transmits no RTP at all, so nothing is ever bridged toward the agent leg and
+its delivery-gated outbound track has nothing to send. The same run proved
+the injected-greeting mirror is a property of the agent leg's media rather
+than of the bidirectional socket: the monitor's inbound track carried the
+identical mirror.
+
+The correction now under review makes the harness behave like a real caller
+with an open line: a second, bidirectional stream on the probe leg injects
+continuously paced true-silence frames with `target_legs=opposite`, so the
+provider continuously delivers genuine caller-side path audio toward the
+agent leg and the monitor's outbound track streams it. Under this shape every
+mirror stays on a diagnostic-only inbound track (probe-leg inbound would
+carry the harness injection's entry mirror; agent-leg inbound carries the
+agent injection's mirror), while both measured channels remain each leg's
+delivered-audio surface. This is not inserted synthetic silence in the
+prohibited sense: no captured waveform is modified, every measured sample
+remains provider-delivered media, and an idle caller line transmitting
+silence models the pre-registered scenario more faithfully than a dead
+endpoint. The methodology-sensitive distinction is recorded here explicitly
+for independent review. Open unknowns: whether adding a bidirectional stream
+to the probe leg suppresses its receive-only stream's outbound track
+(attempts 10 and 11 saw zero outbound frames on a solely-bidirectional probe
+socket), and whether the monitor outbound track streams delivered audio in
+practice.
 
 ## Live attempt log
 
@@ -696,6 +719,26 @@ whether that track supplies frame coverage outside active delivery.
   framing gate and no normalization; channel B gains native-rate fidelity.
   No detector threshold, time bound, or promotion gate was changed.
 
+- 2026-07-12, authorized iterative attempt 24 (`target_legs=opposite`, revision
+  `d42e3b8`): **NO-GO — `agent_audio_not_observed`**. All three sockets passed
+  their exact format gates, including the corrected native-L16 monitor gate.
+  Channel A again carried the delivered greeting cleanly (76 active frames
+  spanning the injection window), reproducing attempt 22's channel-A evidence.
+  The monitor's provider-outbound track delivered zero frames for the entire
+  run, so measured channel B had no coverage, joint greeting selection could
+  not complete, and the run failed closed at the unchanged 15-second horizon
+  with only the channel-A diagnostic WAV written. The captured metadata
+  resolved two structural questions: the probe leg's inbound track also had
+  zero frames — the Call Control-answered harness endpoint transmits no RTP,
+  so nothing is ever bridged toward the agent leg and its delivery-gated
+  outbound track has nothing to send — and the monitor's inbound track carried
+  the same injected-greeting mirror as the bidirectional socket's inbound
+  (identical active window and peak), proving the mirror belongs to the agent
+  leg's media rather than to the bidirectional socket. No fixture was armed.
+  Both legs were hung up, exact webhook restoration was verified, and the
+  tunnel was stopped. The caller-line keepalive correction described above was
+  then prepared for review.
+
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
 diagnostic WAVs under the documented exception. No mapped promotion track WAVs,
@@ -735,6 +778,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized whole-buffer full-transport retry retained.
 - [x] One authorized opposite-target full-transport attempt retained.
 - [x] One authorized monitor-topology format attempt retained.
+- [x] One authorized monitor-coverage attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.
