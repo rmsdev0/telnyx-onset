@@ -535,6 +535,17 @@ gate.
   tunnel was stopped. This clears the receive-only transport prerequisite but
   is not a Phase 2 GO. The one-time HTTPS fixture transport was then implemented
   offline for the next bounded full-measurement call.
+- 2026-07-12, authorized iterative attempt 19 (`target_legs=opposite`, revision
+  `e9195b8`): **NO-GO — `agent_audio_not_observed`**. Both exact media formats
+  and both probe tracks were present, but the joint candidate gate could not
+  prove a natural greeting stop. Channel A was silent; channel B had 600 active
+  20 ms windows and no qualifying stop, while diagnostic-only probe inbound had
+  298 active frames. The controller therefore failed closed at the unchanged
+  15-second greeting limit before arming or serving the fixture URL. Both legs
+  were hung up, exact agent-webhook restoration was verified, and the tunnel
+  was stopped. Comparison with attempt 18's valid channel-B stop identifies
+  non-reproducible returned-media activity, not an HTTPS transport defect; no
+  detector threshold or time bound was changed.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -570,6 +581,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized receive-only common-start attempt retained.
 - [x] One authorized diagnostic-inbound framing attempt retained.
 - [x] One authorized receive-only returned-greeting prerequisite retained.
+- [x] One authorized full-transport attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.
