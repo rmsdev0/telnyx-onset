@@ -896,6 +896,8 @@ def send_cross_leg_pair(
     probe_pcm: bytes,
     reference_pcm: bytes,
     state: dict[str, int],
+    *,
+    probe_delay_s: float = 0.0,
 ) -> None:
     capture = controller.capture_after_authentication()
     controller.mark_media_ready(acoustic_probe.AGENT_CHANNEL, time.monotonic_ns())
@@ -920,6 +922,8 @@ def send_cross_leg_pair(
         agent_frame,
     )
     state["agent_sequence"] += 1
+    if probe_delay_s:
+        time.sleep(probe_delay_s)
     state["probe_chunk"] += 1
     ws.send_text(
         probe_media_raw(
@@ -1210,13 +1214,14 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
                 "probe_chunk": 0,
                 "agent_chunk": 0,
             }
-            for index in range(30):
+            for index in range(40):
                 send_cross_leg_pair(
                     ws,
                     controller,
-                    active_pcmu if index < 5 else silence_pcmu,
+                    active_pcmu if index < 10 else silence_pcmu,
                     silence,
                     state,
+                    probe_delay_s=0.06 if index == 0 else 0.0,
                 )
                 if controller.failure is not None:
                     break
@@ -1227,9 +1232,9 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
         assert ProbeState.STIMULUS_STARTED not in controller.states
         assert not (controller.artifacts.path / "send_frames.jsonl").exists()
         assert controller.probe_integrity is not None
-        assert len(controller.probe_integrity.tracks["outbound"]) == 30 * 160
+        assert len(controller.probe_integrity.tracks["outbound"]) == 40 * 160
         assert controller.capture is not None
-        assert len(controller.capture.tracks[acoustic_probe.PROBE_CHANNEL]) == 30 * 640
+        assert len(controller.capture.tracks[acoustic_probe.PROBE_CHANNEL]) == 40 * 640
         metadata = [
             json.loads(line)
             for line in (controller.artifacts.path / "frame_metadata.jsonl")
@@ -1237,13 +1242,13 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
             .splitlines()
         ]
         measured = [row for row in metadata if row["track"] == "channel_a"]
-        assert len(measured) == 30
+        assert len(measured) == 40
         assert all(row["payload_bytes"] == 640 for row in measured)
         assert all(row["source_payload_bytes"] == 160 for row in measured)
         with wave.open(
             str(controller.artifacts.path / "diagnostic_channel_a.wav"), "rb"
         ) as source:
-            assert source.getparams()[:4] == (1, 2, 16_000, 30 * 320)
+            assert source.getparams()[:4] == (1, 2, 16_000, 40 * 320)
 
 
 def test_receive_only_probe_records_sanitized_source_size_mismatch(

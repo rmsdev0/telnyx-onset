@@ -496,6 +496,17 @@ gate.
   therefore cannot select the acoustic role. Both
   legs were hung up, exact webhook restoration was verified, and the tunnel was
   stopped. A sanitized mismatch-length event is added before changing framing.
+- 2026-07-12, authorized iterative attempt 16 (`target_legs=opposite`, revision
+  `af6aea7`): **NO-GO — `cross_channel_alignment_failed`**. All observed probe
+  frames passed the exact PCMU framing gate, but the first probe frame capable
+  of representing causal greeting start arrived about 155 ms after the first
+  agent frame. The alignment helper incorrectly compared both first frames
+  directly with the requested boundary instead of discarding unequal prefixes
+  and advancing to their latest common observable start, contradicting the
+  documented common-interval rule. No fixture was sent. Both legs were hung up,
+  exact webhook restoration was verified, and the tunnel was stopped. The
+  common-start calculation was corrected offline without changing the 40 ms
+  cross-channel skew limit applied after prefix discard.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -528,6 +539,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized receive-only sanitized format observation retained.
 - [x] One authorized receive-only PCMU-request attempt retained.
 - [x] One authorized PCMU-negotiated framing attempt retained.
+- [x] One authorized receive-only common-start attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

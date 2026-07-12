@@ -982,6 +982,7 @@ def _aligned_host_window(
     end_ns: int | None = None,
     *,
     strict: bool = False,
+    discard_unequal_prefixes: bool = False,
 ) -> dict[str, tuple[int, int]] | None:
     """Map one host-time interval independently onto both socket channels.
 
@@ -1001,6 +1002,14 @@ def _aligned_host_window(
         )
         for track in capture.tracks
     }
+    requested_starts = (
+        {
+            track: _track_boundary(capture, track, start_ns)
+            for track in capture.tracks
+        }
+        if discard_unequal_prefixes
+        else {}
+    )
     last_times = {
         track: max(
             (
@@ -1012,15 +1021,28 @@ def _aligned_host_window(
         )
         for track in capture.tracks
     }
-    if any(value is None for value in first_times.values()) or any(
-        value is None for value in last_times.values()
-    ):
+    missing_start = (
+        any(value is None for value in requested_starts.values())
+        if discard_unequal_prefixes
+        else any(value is None for value in first_times.values())
+    )
+    if missing_start or any(value is None for value in last_times.values()):
         if strict:
             raise ProbeProtocolError("cross_channel_alignment_failed")
         return None
-    complete_first_times = cast("dict[str, int]", first_times)
     complete_last_times = cast("dict[str, int]", last_times)
-    common_start_ns = max(start_ns, *complete_first_times.values())
+    if discard_unequal_prefixes:
+        complete_requested_starts = cast(
+            "dict[str, tuple[int, int]]", requested_starts
+        )
+        # Greeting role selection may discard unequal post-anchor prefixes and
+        # begin at the latest first observable frame on every channel.
+        common_start_ns = max(
+            value[1] for value in complete_requested_starts.values()
+        )
+    else:
+        complete_first_times = cast("dict[str, int]", first_times)
+        common_start_ns = max(start_ns, *complete_first_times.values())
     common_end_ns = min(complete_last_times.values()) if end_ns is None else end_ns
     if common_end_ns <= common_start_ns:
         if strict:
@@ -1132,7 +1154,12 @@ def _candidate_agent_track(
     start_ns: int = 0,
     end_ns: int | None = None,
 ) -> tuple[str | None, dict[str, DetectorAnalysis], bool]:
-    ranges = _aligned_host_window(capture, start_ns, end_ns)
+    ranges = _aligned_host_window(
+        capture,
+        start_ns,
+        end_ns,
+        discard_unequal_prefixes=True,
+    )
     if ranges is None:
         return None, {}, False
     analyses = {
@@ -1599,6 +1626,7 @@ def create_app(
         stimulus_start_ns: int | None = None
         natural_silence_ns: int | None = None
         natural_confirmation_ns: int | None = None
+        greeting_analysis_start_ns: int | None = None
         message_rows = 0
         probe_media_frames = 0
         probe_measurement_frames = 0
@@ -1779,11 +1807,37 @@ def create_app(
                                         "natural_stop_not_observed"
                                     )
                                 aligned = _aligned_host_window(
-                                    capture, controller.greeting_started_ns
+                                    capture,
+                                    controller.greeting_started_ns,
+                                    discard_unequal_prefixes=True,
                                 )
                                 if aligned is None:
                                     continue
                                 selected_start = aligned[agent_track][0]
+                                aligned_start_times = [
+                                    _receive_time_for_track_sample(
+                                        capture,
+                                        track,
+                                        start // SAMPLE_WIDTH,
+                                    )
+                                    for track, (start, _) in aligned.items()
+                                ]
+                                if any(value is None for value in aligned_start_times):
+                                    raise ProbeProtocolError(
+                                        "cross_channel_alignment_failed"
+                                    )
+                                greeting_analysis_start_ns = max(
+                                    cast("list[int]", aligned_start_times)
+                                )
+                                controller.artifacts.append_jsonl(
+                                    "events.jsonl",
+                                    {
+                                        "event": "greeting_analysis_common_start",
+                                        "host_monotonic_ns": (
+                                            greeting_analysis_start_ns
+                                        ),
+                                    },
+                                )
                                 active_sample = _first_active_sample(
                                     natural_analysis,
                                     config.detector.activity_threshold_dbfs,
@@ -2218,14 +2272,14 @@ def create_app(
             if natural_result is None:
                 raise ProbeProtocolError("natural_stop_not_observed")
             if (
-                controller.greeting_started_ns is None
+                greeting_analysis_start_ns is None
                 or natural_silence_ns is None
                 or natural_confirmation_ns is None
             ):
                 raise ProbeProtocolError("cross_channel_alignment_failed")
             window_a = _aligned_host_window(
                 capture,
-                controller.greeting_started_ns,
+                greeting_analysis_start_ns,
                 natural_silence_ns,
                 strict=True,
             )
