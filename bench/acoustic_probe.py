@@ -17,6 +17,7 @@ import io
 import json
 import math
 import os
+import secrets
 import stat
 import statistics
 import subprocess
@@ -42,6 +43,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.responses import StreamingResponse
 
 from bench.acoustic_stop import DetectorAnalysis, DetectorConfig, analyze_acoustic_stop
 from bench.media_capture import (
@@ -91,6 +93,7 @@ CHANNELS = 1
 SAMPLE_WIDTH = 2
 PACING_TOLERANCE_NS = 10_000_000
 AUTH_HANDSHAKE_TIMEOUT_SECONDS = 2.0
+FIXTURE_TOKEN_TTL_SECONDS = 15
 SEPARATING_SILENCE_MS = 100
 POST_CONFIRMATION_GUARD_MS = 2 * FRAME_MS
 GREETING_ANALYSIS_INTERVAL_FRAMES = 10
@@ -190,6 +193,7 @@ class Fixture:
     first_active_sample: int
     onset_method: str
     onset_threshold: int
+    wav_bytes: bytes = b""
 
     @property
     def frames(self) -> tuple[bytes, ...]:
@@ -198,6 +202,23 @@ class Fixture:
             frame = self.pcm16[offset : offset + self.frame_bytes]
             result.append(frame.ljust(self.frame_bytes, b"\x00"))
         return tuple(result)
+
+    @property
+    def http_wav(self) -> bytes:
+        """Return the exact canonical WAV body used by HTTPS playback."""
+        if self.wav_bytes:
+            return self.wav_bytes
+        return _canonical_wav(self.pcm16, self.sample_rate)
+
+
+def _canonical_wav(pcm16: bytes, sample_rate: int) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as target:
+        target.setnchannels(CHANNELS)
+        target.setsampwidth(SAMPLE_WIDTH)
+        target.setframerate(sample_rate)
+        target.writeframes(pcm16)
+    return output.getvalue()
 
 
 def load_fixture(
@@ -263,9 +284,10 @@ def load_fixture(
             break
     if first_active is None:
         raise ValueError("fixture_all_silence")
+    canonical_wav = _canonical_wav(pcm16, sample_rate)
     return Fixture(
         pcm16=pcm16,
-        sha256=fixture_sha256(raw),
+        sha256=fixture_sha256(canonical_wav),
         sample_rate=sample_rate,
         channels=CHANNELS,
         sample_width=SAMPLE_WIDTH,
@@ -273,6 +295,7 @@ def load_fixture(
         first_active_sample=first_active,
         onset_method="first_pcm16_sample_abs_gte_threshold",
         onset_threshold=onset_threshold,
+        wav_bytes=canonical_wav,
     )
 
 
@@ -433,6 +456,10 @@ class BenchConfig:
     def public_webhook_url(self) -> str:
         return f"https://{urlsplit(self.public_wss_base).netloc}/webhook"
 
+    @property
+    def public_https_base(self) -> str:
+        return f"https://{urlsplit(self.public_wss_base).netloc}"
+
 
 class SafeCallControl:
     """Bench-only Call Control client that never logs request or response IDs."""
@@ -546,6 +573,16 @@ class ProbeController:
         self.failure: str | None = None
         self.agent: VoiceAgent | None = None
         self._seen_webhooks: set[str] = set()
+        self._fixture_token: str | None = None
+        self._fixture_call_control_id: str | None = None
+        self._fixture_token_expires_ns: int | None = None
+        self._fixture_token_claimed = False
+        self._fixture_token_lock = asyncio.Lock()
+        self.fixture_transport_armed = False
+        self.fixture_handoff_started_ns: int | None = None
+        self.fixture_handoff_completed_ns: int | None = None
+        self.fixture_handoff_failed = False
+        self._fixture_handoff_start_persisted = False
         self.artifacts = ArtifactDirectory(config.artifacts_root, self.run_id)
         self.started_ns = self.clock.monotonic_ns()
         self.last_transition_ns = self.started_ns
@@ -557,6 +594,99 @@ class ProbeController:
         self.artifacts.append_jsonl(
             "events.jsonl",
             {"event": "probe_started", "host_monotonic_ns": self.started_ns},
+        )
+
+    def arm_fixture_transport(self) -> str:
+        """Create one high-entropy URL bound to this run and outbound leg."""
+        if self.leg_a is None or self._fixture_token is not None:
+            raise ProbeProtocolError("stimulus_send_failed")
+        self._fixture_token = secrets.token_urlsafe(32)
+        self._fixture_call_control_id = self.leg_a
+        self._fixture_token_expires_ns = self.clock.monotonic_ns() + (
+            FIXTURE_TOKEN_TTL_SECONDS * 1_000_000_000
+        )
+        self.fixture_transport_armed = True
+        return (
+            f"{self.config.public_https_base}/fixture/{self.run_id}/"
+            f"{self._fixture_token}.wav"
+        )
+
+    async def claim_fixture_transport(self, run_id: str, token: str) -> bool:
+        """Atomically consume the run-bound playback token exactly once."""
+        async with self._fixture_token_lock:
+            if (
+                self._fixture_token is None
+                or self._fixture_call_control_id is None
+                or self._fixture_token_expires_ns is None
+                or self._fixture_token_claimed
+                or self.clock.monotonic_ns() > self._fixture_token_expires_ns
+                or self.leg_a is None
+                or not hmac.compare_digest(self.leg_a, self._fixture_call_control_id)
+                or not hmac.compare_digest(run_id, self.run_id)
+                or not hmac.compare_digest(token, self._fixture_token)
+            ):
+                return False
+            self._fixture_token_claimed = True
+            self._fixture_token = None
+            self._fixture_call_control_id = None
+            self._fixture_token_expires_ns = None
+            return True
+
+    def mark_fixture_handoff_started(self) -> None:
+        """Set the boundary in memory immediately before the ASGI body yield."""
+        if self.fixture_handoff_started_ns is not None:
+            return
+        self.fixture_handoff_started_ns = self.clock.monotonic_ns()
+        if ProbeState.STIMULUS_STARTED not in self.states:
+            self.states.append(ProbeState.STIMULUS_STARTED)
+            self.last_transition_ns = self.fixture_handoff_started_ns
+
+    def persist_fixture_handoff_started(self) -> None:
+        """Persist the saved boundary only after the active chunk handoff."""
+        if (
+            self.fixture_handoff_started_ns is None
+            or self._fixture_handoff_start_persisted
+        ):
+            return
+        self._fixture_handoff_start_persisted = True
+        self.artifacts.append_jsonl(
+            "events.jsonl",
+            {
+                "event": ProbeState.STIMULUS_STARTED.value.lower(),
+                "host_monotonic_ns": self.fixture_handoff_started_ns,
+            },
+        )
+        self.artifacts.append_jsonl(
+            "events.jsonl",
+            {
+                "event": "stimulus_first_active_chunk_handoff_started",
+                "host_monotonic_ns": self.fixture_handoff_started_ns,
+                "first_active_sample": self.config.fixture.first_active_sample,
+            },
+        )
+
+    def mark_fixture_handoff_completed(self) -> None:
+        self.persist_fixture_handoff_started()
+        self.fixture_handoff_completed_ns = self.clock.monotonic_ns()
+        self.artifacts.append_jsonl(
+            "events.jsonl",
+            {
+                "event": "stimulus_https_response_completed",
+                "host_monotonic_ns": self.fixture_handoff_completed_ns,
+                "payload_bytes": len(self.config.fixture.http_wav),
+                "fixture_sha256": self.config.fixture.sha256,
+            },
+        )
+
+    def mark_fixture_handoff_failed(self) -> None:
+        self.persist_fixture_handoff_started()
+        self.fixture_handoff_failed = True
+        self.artifacts.append_jsonl(
+            "events.jsonl",
+            {
+                "event": "stimulus_https_response_failed",
+                "host_monotonic_ns": self.clock.monotonic_ns(),
+            },
         )
 
     def capture_after_authentication(self) -> CrossLegCapture:
@@ -1003,10 +1133,7 @@ def _aligned_host_window(
         for track in capture.tracks
     }
     requested_starts = (
-        {
-            track: _track_boundary(capture, track, start_ns)
-            for track in capture.tracks
-        }
+        {track: _track_boundary(capture, track, start_ns) for track in capture.tracks}
         if discard_unequal_prefixes
         else {}
     )
@@ -1032,14 +1159,10 @@ def _aligned_host_window(
         return None
     complete_last_times = cast("dict[str, int]", last_times)
     if discard_unequal_prefixes:
-        complete_requested_starts = cast(
-            "dict[str, tuple[int, int]]", requested_starts
-        )
+        complete_requested_starts = cast("dict[str, tuple[int, int]]", requested_starts)
         # Greeting role selection may discard unequal post-anchor prefixes and
         # begin at the latest first observable frame on every channel.
-        common_start_ns = max(
-            value[1] for value in complete_requested_starts.values()
-        )
+        common_start_ns = max(value[1] for value in complete_requested_starts.values())
     else:
         complete_first_times = cast("dict[str, int]", first_times)
         common_start_ns = max(start_ns, *complete_first_times.values())
@@ -1604,6 +1727,44 @@ def create_app(
                 controller.fail("socket_error")
         return Response(status_code=200)
 
+    @app.get("/fixture/{run_id}/{token}.wav")
+    async def fixture_audio(request: Request, run_id: str, token: str) -> Response:
+        """Serve one exact run-bound WAV without exposing its bearer URL."""
+        controller: ProbeController = request.app.state.controller
+        if request.headers.get("range") is not None:
+            raise HTTPException(status_code=416, detail="Range not supported")
+        if not await controller.claim_fixture_transport(run_id, token):
+            raise HTTPException(status_code=404, detail="Not found")
+        body = config.fixture.http_wav
+        active_offset = 44 + config.fixture.first_active_sample * SAMPLE_WIDTH
+        if body[36:40] != b"data" or not 44 <= active_offset < len(body):
+            controller.mark_fixture_handoff_failed()
+            raise HTTPException(status_code=500, detail="Invalid fixture")
+
+        async def exact_body() -> AsyncGenerator[bytes, None]:
+            try:
+                # The active sample is the first PCM sample of this second,
+                # dedicated ASGI response chunk.  Timestamp immediately before
+                # handing that chunk to the server.
+                yield body[:active_offset]
+                controller.mark_fixture_handoff_started()
+                yield body[active_offset:]
+                controller.mark_fixture_handoff_completed()
+            except BaseException:
+                controller.mark_fixture_handoff_failed()
+                raise
+
+        return StreamingResponse(
+            exact_body(),
+            media_type="audio/wav",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Content-Length": str(len(body)),
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @app.websocket("/ws/probe/{run_id}")
     async def probe_ws(ws: WebSocket, run_id: str) -> None:
         controller: ProbeController = ws.app.state.controller
@@ -1674,20 +1835,14 @@ def create_app(
                                 "event": "media_format_observed",
                                 "role": "probe",
                                 "media_format": asdict(frame.media_format),
-                                "host_monotonic_ns": (
-                                    frame.host_receive_monotonic_ns
-                                ),
+                                "host_monotonic_ns": (frame.host_receive_monotonic_ns),
                             },
                         )
                         validate_media_format(
                             frame.media_format,
-                            encoding=(
-                                "PCMU" if config.probe_receive_only else "L16"
-                            ),
+                            encoding=("PCMU" if config.probe_receive_only else "L16"),
                             sample_rate=(
-                                8_000
-                                if config.probe_receive_only
-                                else SAMPLE_RATE
+                                8_000 if config.probe_receive_only else SAMPLE_RATE
                             ),
                             channels=CHANNELS,
                         )
@@ -1915,24 +2070,63 @@ def create_app(
                                     },
                                 )
                                 if config.probe_receive_only:
-                                    raise ProbeProtocolError(
-                                        "stimulus_transport_pending"
+                                    if controller.leg_a is None:
+                                        raise ProbeProtocolError("stimulus_send_failed")
+                                    fixture_url = controller.arm_fixture_transport()
+                                    controller.artifacts.append_jsonl(
+                                        "events.jsonl",
+                                        {
+                                            "event": "stimulus_playback_requested",
+                                            "host_monotonic_ns": (
+                                                controller.clock.monotonic_ns()
+                                            ),
+                                            "fixture_sha256": config.fixture.sha256,
+                                        },
                                     )
-                                stimulus_start_ns = controller.clock.monotonic_ns()
-                                controller.transition(ProbeState.STIMULUS_STARTED)
-                                stimulus_task = asyncio.create_task(
-                                    send_fixture_paced(
-                                        ws, config.fixture, clock=controller.clock
+                                    try:
+                                        await controller.call_control.action(
+                                            controller.leg_a,
+                                            "playback_start",
+                                            {
+                                                "audio_url": fixture_url,
+                                                "audio_type": "wav",
+                                                "cache_audio": False,
+                                                "loop": 1,
+                                                "target_legs": "opposite",
+                                            },
+                                        )
+                                    except Exception as exc:
+                                        raise ProbeProtocolError(
+                                            "stimulus_send_failed"
+                                        ) from exc
+                                else:
+                                    stimulus_start_ns = controller.clock.monotonic_ns()
+                                    controller.transition(ProbeState.STIMULUS_STARTED)
+                                    stimulus_task = asyncio.create_task(
+                                        send_fixture_paced(
+                                            ws, config.fixture, clock=controller.clock
+                                        )
                                     )
-                                )
                             elif (
                                 frame.host_receive_monotonic_ns
                                 >= controller.greeting_started_ns
                                 + MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
                             ):
                                 raise ProbeProtocolError("agent_audio_not_observed")
-                        elif stimulus_task is not None and stimulus_task.done():
-                            if pacing is None:
+                        elif (stimulus_task is not None and stimulus_task.done()) or (
+                            config.probe_receive_only
+                            and controller.fixture_handoff_completed_ns is not None
+                        ):
+                            if config.probe_receive_only:
+                                if (
+                                    controller.fixture_handoff_failed
+                                    or controller.fixture_handoff_started_ns is None
+                                ):
+                                    raise ProbeProtocolError("stimulus_send_failed")
+                                stimulus_start_ns = (
+                                    controller.fixture_handoff_started_ns
+                                )
+                            if stimulus_task is not None and pacing is None:
                                 try:
                                     pacing = stimulus_task.result()
                                 except Exception as exc:
@@ -2345,9 +2539,7 @@ def create_app(
                 contamination=asdict(contamination),
                 ordering_anomalies={
                     "measurement_channels": asdict(capture.ordering.counts),
-                    "agent_socket": asdict(
-                        controller.agent_integrity.ordering.counts
-                    ),
+                    "agent_socket": asdict(controller.agent_integrity.ordering.counts),
                     "probe_socket": asdict(probe_integrity.ordering.counts),
                 },
                 pacing={
@@ -2374,6 +2566,12 @@ def create_app(
                     pacing = stimulus_task.result()
                 except (asyncio.CancelledError, Exception):
                     stimulus_failed = True
+            if (
+                config.probe_receive_only
+                and controller.fixture_transport_armed
+                and controller.fixture_handoff_completed_ns is None
+            ):
+                stimulus_failed = True
             controller.fail(
                 "stimulus_send_failed"
                 if stimulus_failed
@@ -2626,6 +2824,7 @@ def main() -> None:
         host=config.settings.host,
         port=config.settings.port,
         log_level="warning",
+        access_log=False,
     )
 
 

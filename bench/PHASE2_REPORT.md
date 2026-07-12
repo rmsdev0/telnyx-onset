@@ -22,8 +22,10 @@ The subsequent sanitized configuration audit found that the harness number is
 assigned to a separate Call Control application, while the bench had originated
 through the agent application's connection. Correct separate-application
 origination was then tested and produced the same zero-outbound result.
-Bidirectional WebSocket capture is exhausted; receive-only probe streaming plus
-harness-served fixture playback remains under review.
+Bidirectional WebSocket capture is exhausted. A receive-only staged run has now
+proved a returned greeting and natural stop on the joint channel candidate.
+The narrowly scoped harness-served fixture playback required for the full
+measurement call is implemented offline and awaits its bounded live attempt.
 No fixture match, manual waveform review, detector calibration, or empirical GO
 was produced. Phase 3 remains blocked.
 
@@ -331,11 +333,19 @@ Agent/stimulus roles are still
 proven jointly by greeting activity, silence, fixture correlation, and
 post-stimulus response; no role is inferred from `inbound` or `outbound`. The
 two sockets retain independent ordering domains, with track-local measurement
-continuity. The first receive-only diagnostic deliberately stops with named
+continuity. The first receive-only diagnostic deliberately stopped with named
 `stimulus_transport_pending` immediately after proving a returned greeting and
-natural stop; it sends no fixture. The one-time HTTPS fixture transport is
-implemented only if that prerequisite direction is empirically present, so an
-absent outbound track cannot broaden the live surface unnecessarily.
+natural stop; it sent no fixture. Because that prerequisite direction is now
+empirically present, the one-time HTTPS transport is implemented. After natural
+stop, the harness requests `playback_start` toward the opposite (agent) leg with
+an explicit WAV type, one loop, provider caching disabled, and a high-entropy
+run-bound URL. The GET is atomically consumed once, rejects Range and retries,
+disables HTTP caching and live access logs, and never records the bearer URL. It
+serves the exact bounded canonical WAV whose SHA-256 is in the manifest.
+The first active PCM sample begins a dedicated ASGI response chunk; the same
+process records monotonic time immediately before handing off that chunk and
+records full-response completion or failure. Provider playback webhooks remain
+diagnostic only and cannot define an acoustic boundary.
 
 The harness connection is required, nonempty, and distinct from the agent
 connection. Immediately before dialing, read-only Telnyx lookups require both
@@ -516,6 +526,15 @@ gate.
   exact webhook restoration was verified, and the tunnel was stopped. The exact
   160-byte gate is now scoped to measured outbound; variable diagnostic inbound
   remains integrity/metadata-only and cannot enter acoustic analysis.
+- 2026-07-12, authorized iterative attempt 18 (`target_legs=opposite`, revision
+  `318e18c`): **EXPECTED STAGED NO-GO — `stimulus_transport_pending`**. Both
+  exact media-format gates passed. Joint common-interval analysis selected
+  channel B, observed greeting activity, and confirmed its natural stop; the
+  staged controller then halted before fixture transmission exactly as designed.
+  Both legs were hung up, exact agent-webhook restoration was verified, and the
+  tunnel was stopped. This clears the receive-only transport prerequisite but
+  is not a Phase 2 GO. The one-time HTTPS fixture transport was then implemented
+  offline for the next bounded full-measurement call.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -550,6 +569,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized PCMU-negotiated framing attempt retained.
 - [x] One authorized receive-only common-start attempt retained.
 - [x] One authorized diagnostic-inbound framing attempt retained.
+- [x] One authorized receive-only returned-greeting prerequisite retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import time
@@ -821,9 +822,7 @@ def test_contamination_metric_rejects_mixed_tracks() -> None:
     assert mixed.absolute_waveform_correlation == pytest.approx(1.0)
 
 
-def start_raw(
-    call_id: str, *, encoding: str = "L16", sample_rate: int = 16_000
-) -> str:
+def start_raw(call_id: str, *, encoding: str = "L16", sample_rate: int = 16_000) -> str:
     return json.dumps(
         {
             "event": "start",
@@ -1183,7 +1182,7 @@ def test_probe_route_both_tracks_rejects_queued_fixture_as_response(
         assert manifest["failure_category"] == "fixture_match_ambiguous"
 
 
-def test_receive_only_probe_stops_after_proving_returned_greeting(
+def test_receive_only_probe_arms_https_playback_after_returned_greeting(
     tmp_path: Path,
 ) -> None:
     base = config(tmp_path)
@@ -1194,7 +1193,8 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
         artifacts_root=tmp_path / "receive-only-route-artifacts",
         probe_receive_only=True,
     )
-    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    fake = FakeCallControl(cfg.settings)
+    app = create_app(cfg, cast("SafeCallControl", fake))
     active_pcmu = b"\xa0" * 160
     silence_pcmu = b"\xff" * 160
     silence = b"\x00\x00" * 320
@@ -1225,30 +1225,210 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
                 )
                 if controller.failure is not None:
                     break
-            with pytest.raises(WebSocketDisconnect):
-                ws.receive_text()
-        assert controller.failure == "stimulus_transport_pending"
-        assert ProbeState.AGENT_NATURAL_STOP_OBSERVED in controller.states
-        assert ProbeState.STIMULUS_STARTED not in controller.states
-        assert not (controller.artifacts.path / "send_frames.jsonl").exists()
-        assert controller.probe_integrity is not None
-        assert len(controller.probe_integrity.tracks["outbound"]) == 40 * 160
-        assert controller.capture is not None
-        assert len(controller.capture.tracks[acoustic_probe.PROBE_CHANNEL]) == 40 * 640
-        metadata = [
+            playback: list[tuple[str, str, dict[str, object]]] = []
+            for _ in range(1_000):
+                playback = [
+                    action for action in fake.actions if action[1] == "playback_start"
+                ]
+                if playback:
+                    break
+                time.sleep(0.001)
+            assert len(playback) == 1
+            assert playback[0][0] == "memory-leg-a"
+            assert set(playback[0][2]) == {
+                "audio_url",
+                "audio_type",
+                "cache_audio",
+                "loop",
+                "target_legs",
+            }
+            assert playback[0][2]["audio_type"] == "wav"
+            assert playback[0][2]["cache_audio"] is False
+            assert playback[0][2]["loop"] == 1
+            assert playback[0][2]["target_legs"] == "opposite"
+            assert ProbeState.AGENT_NATURAL_STOP_OBSERVED in controller.states
+            assert ProbeState.STIMULUS_STARTED not in controller.states
+            assert controller.fixture_transport_armed
+            assert controller.fixture_handoff_started_ns is None
+            assert not (controller.artifacts.path / "send_frames.jsonl").exists()
+
+
+def test_https_fixture_is_exact_single_use_no_range_and_timestamped(
+    tmp_path: Path,
+) -> None:
+    fixture_path = tmp_path / "fixture.wav"
+    write_wav(fixture_path, array("h", [0] * 10 + [1_000] * 640))
+    base = config(tmp_path)
+    cfg = replace(
+        base,
+        fixture=load_fixture(fixture_path),
+        artifacts_root=tmp_path / "https-fixture-artifacts",
+        probe_receive_only=True,
+    )
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        controller.leg_a = "memory-leg-a"
+        url = controller.arm_fixture_transport()
+        path = url.removeprefix(cfg.public_https_base)
+
+        ranged = client.get(path, headers={"Range": "bytes=0-10"})
+        assert ranged.status_code == 416
+        assert client.head(path).status_code == 405
+        assert client.post(path).status_code == 405
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.content == cfg.fixture.http_wav
+        assert response.headers["cache-control"].startswith("no-store")
+        assert response.headers["content-length"] == str(len(cfg.fixture.http_wav))
+        assert client.get(path).status_code == 404
+
+        assert ProbeState.STIMULUS_STARTED in controller.states
+        assert controller.fixture_handoff_started_ns is not None
+        assert controller.fixture_handoff_completed_ns is not None
+        assert not controller.fixture_handoff_failed
+        events = [
             json.loads(line)
-            for line in (controller.artifacts.path / "frame_metadata.jsonl")
+            for line in (controller.artifacts.path / "events.jsonl")
             .read_text()
             .splitlines()
         ]
-        measured = [row for row in metadata if row["track"] == "channel_a"]
-        assert len(measured) == 40
-        assert all(row["payload_bytes"] == 640 for row in measured)
-        assert all(row["source_payload_bytes"] == 160 for row in measured)
-        with wave.open(
-            str(controller.artifacts.path / "diagnostic_channel_a.wav"), "rb"
-        ) as source:
-            assert source.getparams()[:4] == (1, 2, 16_000, 40 * 320)
+        handoff = next(
+            row
+            for row in events
+            if row["event"] == "stimulus_first_active_chunk_handoff_started"
+        )
+        assert handoff["first_active_sample"] == 10
+        assert all("audio_url" not in row for row in events)
+
+
+@pytest.mark.asyncio
+async def test_https_fixture_token_expires_and_is_bound_to_call(tmp_path: Path) -> None:
+    cfg = replace(
+        config(tmp_path),
+        artifacts_root=tmp_path / "https-token-artifacts",
+        probe_receive_only=True,
+    )
+    controller = ProbeController(
+        cfg, cast("SafeCallControl", FakeCallControl(cfg.settings))
+    )
+    controller.leg_a = "memory-leg-a"
+    url = controller.arm_fixture_transport()
+    token = url.rsplit("/", 1)[1].removesuffix(".wav")
+    controller.leg_a = "different-leg"
+    assert not await controller.claim_fixture_transport(controller.run_id, token)
+
+    second = ProbeController(
+        replace(cfg, artifacts_root=tmp_path / "expired-token-artifacts"),
+        cast("SafeCallControl", FakeCallControl(cfg.settings)),
+    )
+    second.leg_a = "memory-leg-a"
+    expired_url = second.arm_fixture_transport()
+    expired_token = expired_url.rsplit("/", 1)[1].removesuffix(".wav")
+    second._fixture_token_expires_ns = second.clock.monotonic_ns() - 1
+    assert not await second.claim_fixture_transport(second.run_id, expired_token)
+
+
+def test_receive_only_https_fixture_completes_joint_lifecycle(tmp_path: Path) -> None:
+    base = config(tmp_path)
+    fixture, fixture_frames = patterned_fixture()
+    fixture = replace(fixture, sha256=hashlib.sha256(fixture.http_wav).hexdigest())
+    cfg = replace(
+        base,
+        fixture=fixture,
+        artifacts_root=tmp_path / "receive-only-https-lifecycle-artifacts",
+        probe_receive_only=True,
+    )
+    fake = FakeCallControl(cfg.settings)
+    app = create_app(cfg, cast("SafeCallControl", fake))
+    active_pcmu = b"\xa0" * 160
+    silence_pcmu = b"\xff" * 160
+    silence = b"\x00\x00" * 320
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        controller.leg_b = "memory-leg-b"
+        controller.bridge_ready.set()
+        token = _route_token(controller)
+        with client.websocket_connect(
+            f"/ws/probe/{controller.run_id}",
+            headers={"x-telnyx-streaming-auth-token": token},
+        ) as ws:
+            ws.send_text(start_raw("route-call", encoding="PCMU", sample_rate=8_000))
+            state = {
+                "probe_sequence": 2,
+                "agent_sequence": 2,
+                "probe_chunk": 0,
+                "agent_chunk": 0,
+            }
+
+            def send_pair(probe: bytes, agent: bytes) -> None:
+                send_cross_leg_pair(ws, controller, probe, agent, state)
+
+            for index in range(40):
+                send_pair(active_pcmu if index < 10 else silence_pcmu, silence)
+
+            playback: list[tuple[str, str, dict[str, object]]] = []
+            for _ in range(1_000):
+                playback = [
+                    action for action in fake.actions if action[1] == "playback_start"
+                ]
+                if playback:
+                    break
+                time.sleep(0.001)
+            assert len(playback) == 1
+            assert playback[0][0] == "memory-leg-a"
+            payload = playback[0][2]
+            assert payload == {
+                "audio_url": payload["audio_url"],
+                "audio_type": "wav",
+                "cache_audio": False,
+                "loop": 1,
+                "target_legs": "opposite",
+            }
+            fixture_url = cast("str", payload["audio_url"])
+            fixture_token = fixture_url.rsplit("/", 1)[1].removesuffix(".wav")
+            response = client.get(fixture_url.removeprefix(cfg.public_https_base))
+            assert response.status_code == 200
+            assert hashlib.sha256(response.content).hexdigest() == fixture.sha256
+
+            for index in range(104):
+                returned = fixture_frames[index - 5] if 5 <= index < 9 else silence
+                send_pair(silence_pcmu, returned)
+            for index in range(35):
+                send_pair(active_pcmu if index < 6 else silence_pcmu, silence)
+                if (
+                    controller.failure is not None
+                    or ProbeState.CAPTURE_COMPLETED in controller.states
+                ):
+                    break
+            for _ in range(3_000):
+                if (
+                    controller.failure is not None
+                    or ProbeState.CAPTURE_COMPLETED in controller.states
+                ):
+                    break
+                time.sleep(0.001)
+            else:
+                raise AssertionError("receive-only HTTPS lifecycle did not terminate")
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_text()
+
+        assert controller.failure is None
+        assert ProbeState.CAPTURE_COMPLETED in controller.states
+        manifest = json.loads((controller.artifacts.path / "manifest.json").read_text())
+        assert manifest["gate_outcome"] == "CAPTURE_COMPLETE_PENDING_REVIEW"
+        assert manifest["teardown_result"] == "both_legs_hung_up"
+        assert manifest["track_mapping"] == {
+            "agent": acoustic_probe.PROBE_CHANNEL,
+            "stimulus": acoustic_probe.AGENT_CHANNEL,
+        }
+        artifact_text = "\n".join(
+            path.read_text()
+            for path in controller.artifacts.path.iterdir()
+            if path.suffix in {".json", ".jsonl", ".csv"}
+        )
+        assert fixture_token not in artifact_text
+        assert fixture_url not in artifact_text
 
 
 def test_receive_only_probe_records_sanitized_source_size_mismatch(
@@ -1677,9 +1857,7 @@ def test_probe_and_agent_routes_capture_concurrently(
                     pcm16=b"\x02\x00" * 320,
                 )
             )
-            agent_ws.send_text(
-                json.dumps({"event": "stop", "sequence_number": "7"})
-            )
+            agent_ws.send_text(json.dumps({"event": "stop", "sequence_number": "7"}))
             for _ in range(1_000):
                 capture = controller.capture
                 if (
@@ -1993,9 +2171,7 @@ def test_fixture_reference_search_follows_delayed_returned_audio() -> None:
 def test_pcmu_decode_matches_g711_vectors_and_normalizes_duration() -> None:
     decoded = array(
         "h",
-        acoustic_probe.decode_pcmu_8k_to_pcm16_16k(
-            bytes((0xFF, 0x7F, 0x80, 0x00))
-        ),
+        acoustic_probe.decode_pcmu_8k_to_pcm16_16k(bytes((0xFF, 0x7F, 0x80, 0x00))),
     )
     assert decoded.tolist() == [0, 0, 0, 0, 32124, 32124, -32124, -32124]
     frame = acoustic_probe.decode_pcmu_8k_to_pcm16_16k(b"\xff" * 160)
