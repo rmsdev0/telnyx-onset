@@ -886,26 +886,32 @@ def _aligned_host_window(
         return None
     start_values = cast("dict[str, tuple[int, int]]", starts)
     end_values = cast("dict[str, tuple[int, int]]", ends)
-    if (
+    start_invalid = (
         any(
             value[1] - common_start_ns > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
             for value in start_values.values()
         )
-        or (
-            end_ns is not None
-            and any(
-                value[1] - end_ns > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
-                for value in end_values.values()
-            )
-        )
         or max(value[1] for value in start_values.values())
         - min(value[1] for value in start_values.values())
         > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
-        or max(value[1] for value in end_values.values())
-        - min(value[1] for value in end_values.values())
-        > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
-    ):
+    )
+    end_invalid = max(value[1] for value in end_values.values()) - min(
+        value[1] for value in end_values.values()
+    ) > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS or (
+        end_ns is not None
+        and any(
+            value[1] - end_ns > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
+            for value in end_values.values()
+        )
+    )
+    if start_invalid or (end_invalid and (end_ns is not None or strict)):
         raise ProbeProtocolError("cross_channel_alignment_failed")
+    if end_invalid:
+        # A live, open-ended window can temporarily lack a sufficiently close
+        # completed endpoint when one handler is delayed. More frames can move
+        # the common end forward and resolve it; fixed historical boundaries
+        # above cannot change and therefore fail immediately.
+        return None
     ranges = {
         track: (start_values[track][0], end_values[track][0])
         for track in capture.tracks

@@ -4,18 +4,19 @@
 
 **NO-GO**
 
-The offline remediation is implemented and tested, but the bounded live probe
-could not expose the two stable tracks required by the preregistered acoustic
-boundary. Three authorized attempts were run and retained. Neither explicit
-target-leg setting produced a second returned track, so no track mapping,
-fixture match, manual waveform review, detector calibration, or empirical GO
-was possible. Phase 3 is blocked.
+The offline remediation is implemented and tested. The original three attempts
+could not expose two tracks on one socket. A separately authorized fourth call
+exercised the dual-socket topology and captured both channels, but stopped
+fail-closed during the greeting on a transient 92.3 ms dynamic-end receive gap.
+No track mapping, fixture match, manual waveform review, detector calibration,
+or empirical GO was produced. Phase 3 remains blocked.
 
 ## Repository and scope
 
 - Remediation base: `b861afdfe22201474a018a778803d9451d5c6c14`
 - Live-probe revision after attempt-1 correction:
   `24e0b74` (`Defer probe stream until bridge readiness`)
+- Dual-socket live revision: `e72c839` (`Align Phase 2 cross-leg media capture`)
 - Branch: `duplex`
 - Methodology authority: `BENCHMARK_PLAN.md`, unchanged
 - Production runtime modules modified: none
@@ -165,6 +166,12 @@ required fixture-reference mapping or acoustic boundary, the attempt cap is
 exhausted, `measurement_profile.json` must remain absent, and Phase 3 remains
 blocked. The reviewer inspected no audio, provider identifiers, or secrets.
 
+An independent sanitized-evidence review of the fourth call also confirmed
+empirical **NO-GO**, while returning **GO** for the offline dynamic-end fix. It
+independently reproduced 189/278 channel frames, the 92.318667 ms transient,
+and fixed-helper replay with 187 aligned evaluations, two waits, and zero
+errors. No audio, provider identifier, or secret was required.
+
 ## Manual review procedure
 
 After a separately authorized live run, inspect only its ignored local run
@@ -182,11 +189,18 @@ This is waveform agreement validation, not a human-perception measurement.
 
 ## Live findings and remaining unknowns
 
-- `target_legs=opposite` produced 2,859 frames, all labeled `inbound`.
+- The original `target_legs=opposite` run produced 2,859 frames, all labeled
+  `inbound` on its single probe socket.
 - `target_legs=self` produced 2,834 frames, all labeled `inbound`.
-- A second returned track was absent under both explicit settings, so stable
-  track separation and track-to-leg orientation could not be established.
-- Negotiated media format, framing, jitter, gaps, and ordering.
+- The separately authorized dual-socket `target_legs=opposite` run captured 189
+  channel-A frames and 278 channel-B frames in expected L16/16 kHz format before
+  its fail-closed stop. Its single transient dynamic-end comparison selected
+  endpoints 92.3 ms apart; offline replay after changing that open window to
+  wait-for-coverage produced 187 aligned evaluations, two transient waits, and
+  zero alignment errors.
+- Stable track separation and track-to-leg orientation remain unproven because
+  the fourth call ended before greeting selection or fixture transmission.
+- Framing jitter and ordering across a complete capture.
 - Returned-fixture correlation under the live topology.
 - Cross-feed and overlap behavior.
 - Natural-stop and forced-stop detector agreement with waveform inspection.
@@ -259,10 +273,22 @@ gate.
   The alternative target setting again reached media, but all 2,834 frame rows
   carried only the `inbound` track label. The hard cap ended the attempt and
   both legs were hung up.
+- 2026-07-11, separately authorized attempt 4 (`target_legs=opposite`, revision
+  `e72c839`): **NO-GO — `cross_channel_alignment_failed`**. Both authenticated
+  sockets reached the expected media format and captured 467 total frames. A
+  transient channel-A receive gap made the current open-ended greeting window
+  appear 92.3 ms apart and the handler failed immediately. The call ended
+  before track mapping or fixture transmission. Sanitized offline replay shows
+  this endpoint was temporary: waiting for common dynamic coverage converts the
+  same evidence to two waits and 187 valid alignments with no relaxed fixed
+  boundary. Teardown was attempted; the manifest records `hangup_failed` after
+  a leg had already ended. Its manifest `attempt_number: 1` is the ordinal
+  within that one-attempt CLI process; “attempt 4” is the cumulative project
+  log ordinal used in this report.
 
-The maximum-three-attempt policy is exhausted. Failed runs produced sanitized
-metadata only; no mapped track WAVs, comparative results, or measurement profile
-were produced.
+The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
+explicit authorization. Failed runs produced sanitized metadata only; no mapped
+track WAVs, comparative results, or measurement profile were produced.
 
 ## Gate checklist
 
@@ -278,6 +304,7 @@ were produced.
 - [x] Finite calibration evaluation support without auto-selection.
 - [x] Offline route/component/adversarial tests.
 - [x] Three separately authorized bounded live attempts retained.
+- [x] One separately authorized post-cap dual-socket attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

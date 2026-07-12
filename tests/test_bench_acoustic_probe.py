@@ -1450,6 +1450,49 @@ def test_host_alignment_bounds_delayed_and_missing_channel_coverage() -> None:
     assert exc_info.value.category == "cross_channel_alignment_failed"
 
 
+def test_dynamic_common_end_waits_for_transient_handler_gap() -> None:
+    capture = CrossLegCapture(
+        (acoustic_probe.PROBE_CHANNEL, acoustic_probe.AGENT_CHANNEL),
+        max_bytes_per_channel=100_000,
+        max_event_rows=100,
+    )
+    silence = b"\x00\x00" * 320
+
+    def append(channel: str, sequence: int, receive_ms: int) -> None:
+        capture.append(
+            channel,
+            MediaFrame(
+                sequence,
+                channel,
+                "inbound",
+                sequence,
+                (sequence - 1) * 20,
+                silence,
+                1_000_000_000 + receive_ms * 1_000_000,
+            ),
+        )
+
+    for sequence, receive_ms in enumerate((0, 20, 140), start=1):
+        append(acoustic_probe.PROBE_CHANNEL, sequence, receive_ms)
+    for sequence, receive_ms in enumerate((0, 20, 40, 60, 80), start=1):
+        append(acoustic_probe.AGENT_CHANNEL, sequence, receive_ms)
+
+    assert acoustic_probe._aligned_host_window(capture, 1_000_000_000) is None
+    with pytest.raises(ProbeProtocolError):
+        acoustic_probe._aligned_host_window(capture, 1_000_000_000, strict=True)
+    with pytest.raises(ProbeProtocolError) as exc_info:
+        acoustic_probe._aligned_host_window(
+            capture,
+            1_000_000_000,
+            1_080_000_000,
+            strict=True,
+        )
+    assert exc_info.value.category == "cross_channel_alignment_failed"
+
+    append(acoustic_probe.AGENT_CHANNEL, 6, 120)
+    assert acoustic_probe._aligned_host_window(capture, 1_000_000_000) is not None
+
+
 @pytest.mark.parametrize(
     ("receive_period_ns", "valid"),
     [(20_000_000, True), (1_000_000, True), (40_000_000, False)],
