@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import hashlib
@@ -710,6 +711,34 @@ def test_live_config_requires_explicit_target_and_hard_bounds(tmp_path: Path) ->
             fixture=cfg.fixture,
             artifacts_root=tmp_path / "seven",
         )
+
+
+def test_live_config_uses_stable_whole_buffer_greeting_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = tmp_path / "fixture.wav"
+    write_wav(fixture, array("h", [1_000] * 320))
+    values = {
+        "BENCH_LIVE": "1",
+        "BENCH_AGENT_NUMBER": "+15550000001",
+        "BENCH_HARNESS_NUMBER": "+15550000002",
+        "BENCH_HARNESS_CONNECTION_ID": "harness-connection",
+        "BENCH_PUBLIC_WSS_BASE": "wss://example.invalid",
+        "TELNYX_API_KEY": "local-key",
+        "TELNYX_PUBLIC_KEY": "local-public-key",
+        "TELNYX_CONNECTION_ID": "agent-connection",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    arguments = argparse.Namespace(fixture=fixture, target_legs="opposite")
+    cfg = acoustic_probe._live_config(arguments)
+    assert cfg.settings.tts_streaming_decode is False
+    controller = ProbeController(
+        replace(cfg, artifacts_root=tmp_path / "live-config-artifacts"),
+        cast("SafeCallControl", FakeCallControl(cfg.settings)),
+    )
+    manifest = json.loads((controller.artifacts.path / "manifest.json").read_text())
+    assert manifest["greeting_tts_decode_mode"] == "whole_buffer"
 
 
 @pytest.mark.asyncio

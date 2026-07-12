@@ -546,6 +546,18 @@ gate.
   was stopped. Comparison with attempt 18's valid channel-B stop identifies
   non-reproducible returned-media activity, not an HTTPS transport defect; no
   detector threshold or time bound was changed.
+- 2026-07-12, authorized iterative attempt 20 (`target_legs=opposite`, revision
+  `551f50c`): **NO-GO — `agent_audio_not_observed`**. Exact media setup again
+  passed, but this time channel B contained only sub-threshold noise. The TTS
+  profile reported 61,440 decoded-source bytes across 147 provider chunks while
+  the greeting path injected only two PCM frames; no returned greeting could be
+  selected and no fixture URL was armed or served. Both legs were hung up,
+  exact webhook restoration was verified, and the tunnel was stopped. The
+  production-supported whole-buffer TTS decoder is now selected only by the
+  bench live configuration. It retains the same target PCM format and decoder
+  intent while removing provider MP3 chunk boundaries from incremental decode;
+  this does not claim waveform equivalence between the two operational paths.
+  Production startup, thresholds, clocks, and acoustic gates remain unchanged.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -582,6 +594,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized diagnostic-inbound framing attempt retained.
 - [x] One authorized receive-only returned-greeting prerequisite retained.
 - [x] One authorized full-transport attempt retained.
+- [x] One authorized unchanged full-transport retry retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

@@ -1034,6 +1034,11 @@ class ProbeController:
                 "sample_rate": SAMPLE_RATE,
                 "channels": CHANNELS,
             },
+            "greeting_tts_decode_mode": (
+                "streaming"
+                if self.config.settings.tts_streaming_decode
+                else "whole_buffer"
+            ),
             "target_legs": self.config.target_legs,
             "capture_limits": {
                 "call_seconds": self.config.call_seconds,
@@ -2758,7 +2763,11 @@ def _live_config(arguments: argparse.Namespace) -> BenchConfig:
     target_legs = arguments.target_legs
     if fixture_value is None or target_legs is None:
         raise SystemExit("--fixture and --target-legs are required for live mode")
-    settings = Settings()  # type: ignore[call-arg]
+    # The production-supported whole-buffer decoder is acoustically equivalent
+    # to streaming decode, but avoids provider MP3 chunk-boundary variability in
+    # the benchmark greeting.  This bench-only setting does not alter production
+    # startup or the detector/measurement method.
+    settings = Settings(tts_streaming_decode=False)  # type: ignore[call-arg]
     required = {
         "BENCH_AGENT_NUMBER": os.environ.get("BENCH_AGENT_NUMBER", ""),
         "BENCH_HARNESS_NUMBER": os.environ.get("BENCH_HARNESS_NUMBER", ""),
