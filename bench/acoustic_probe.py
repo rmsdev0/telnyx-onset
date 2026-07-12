@@ -1683,6 +1683,18 @@ def create_app(
                         continue
                     if isinstance(frame, MediaFrame):
                         if config.probe_receive_only and len(frame.pcm16) != 160:
+                            controller.artifacts.append_jsonl(
+                                "events.jsonl",
+                                {
+                                    "event": "media_frame_size_mismatch",
+                                    "role": "probe",
+                                    "track": frame.track,
+                                    "source_payload_bytes": len(frame.pcm16),
+                                    "host_monotonic_ns": (
+                                        frame.host_receive_monotonic_ns
+                                    ),
+                                },
+                            )
                             raise ProbeProtocolError("media_format_mismatch")
                         probe_integrity.append(frame)
                         normalized = (

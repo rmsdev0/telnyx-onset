@@ -1246,6 +1246,41 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
             assert source.getparams()[:4] == (1, 2, 16_000, 30 * 320)
 
 
+def test_receive_only_probe_records_sanitized_source_size_mismatch(
+    tmp_path: Path,
+) -> None:
+    cfg = replace(config(tmp_path), probe_receive_only=True)
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        controller.bridge_ready.set()
+        token = _route_token(controller)
+        with (
+            pytest.raises(WebSocketDisconnect),
+            client.websocket_connect(
+                f"/ws/probe/{controller.run_id}",
+                headers={"x-telnyx-streaming-auth-token": token},
+            ) as ws,
+        ):
+            ws.send_text(start_raw("route-call", encoding="PCMU", sample_rate=8_000))
+            ws.send_text(
+                probe_media_raw(
+                    sequence=2,
+                    track="outbound",
+                    chunk=1,
+                    timestamp=0,
+                    pcm16=b"\xff" * 80,
+                )
+            )
+            ws.receive_text()
+        assert controller.failure == "media_format_mismatch"
+        events = (controller.artifacts.path / "events.jsonl").read_text()
+        assert '"event":"media_frame_size_mismatch"' in events
+        assert '"source_payload_bytes":80' in events
+        assert '"track":"outbound"' in events
+        assert "route-call" not in events
+
+
 @pytest.mark.parametrize(
     "mode", ["success", "overlap", "mixed_response", "lagging_mirror"]
 )

@@ -486,6 +486,16 @@ gate.
   negotiated G.722. The mismatch failed before agent startup or media. Both
   legs were hung up, exact webhook restoration was verified, and the tunnel was
   stopped. The harness dial now explicitly prefers PCMU before streaming starts.
+- 2026-07-12, authorized iterative attempt 15 (`target_legs=opposite`, revision
+  `eba46b5`): **NO-GO — `media_format_mismatch`**. PCMU negotiation succeeded:
+  the probe exposed both tracks at PCMU/8 kHz/mono and the agent remained
+  L16/16 kHz/mono. After 297 valid 160-byte probe-outbound frames, an unexpected
+  source frame size triggered the exact framing gate. No fixture was sent. The
+  channel-A WAV and metadata showed probe outbound quiet, while separate
+  sanitized frame metadata showed probe inbound activity; provider labels
+  therefore cannot select the acoustic role. Both
+  legs were hung up, exact webhook restoration was verified, and the tunnel was
+  stopped. A sanitized mismatch-length event is added before changing framing.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -517,6 +527,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized receive-only format attempt retained.
 - [x] One authorized receive-only sanitized format observation retained.
 - [x] One authorized receive-only PCMU-request attempt retained.
+- [x] One authorized PCMU-negotiated framing attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.
