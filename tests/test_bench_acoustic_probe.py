@@ -486,7 +486,9 @@ async def test_receive_only_probe_omits_all_bidirectional_options(
     assert agent_payload["stream_bidirectional_target_legs"] == cfg.target_legs
     assert "/ws/agent/" in str(agent_payload["stream_url"])
     assert monitor_payload["stream_track"] == "both_tracks"
-    assert monitor_payload["stream_codec"] == "PCMU"
+    # Attempt 23: the agent leg's receive-only stream delivers native L16 and
+    # ignores codec overrides, so the monitor sends none.
+    assert "stream_codec" not in monitor_payload
     assert not any(key.startswith("stream_bidirectional") for key in monitor_payload)
     assert "stream_auth_token" in monitor_payload
     assert "/ws/monitor/" in str(monitor_payload["stream_url"])
@@ -1622,10 +1624,10 @@ def test_monitor_route_rejects_probe_and_agent_tokens(tmp_path: Path) -> None:
         assert controller.failure == "stream_auth_failed"
 
 
-def test_monitor_route_measures_only_outbound_pcmu(tmp_path: Path) -> None:
+def test_monitor_route_measures_only_outbound_l16(tmp_path: Path) -> None:
     cfg = replace(config(tmp_path), probe_receive_only=True)
     app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
-    active_pcmu = b"\xa0" * 160
+    active_l16 = b"\x01\x04" * 320
     with TestClient(app) as client:
         controller: ProbeController = app.state.controller
         token = _route_token(controller, role="monitor")
@@ -1633,14 +1635,14 @@ def test_monitor_route_measures_only_outbound_pcmu(tmp_path: Path) -> None:
             f"/ws/monitor/{controller.run_id}",
             headers={"x-telnyx-streaming-auth-token": token},
         ) as ws:
-            ws.send_text(start_raw("route-call", encoding="PCMU", sample_rate=8_000))
+            ws.send_text(start_raw("route-call"))
             ws.send_text(
                 probe_media_raw(
                     sequence=2,
                     track="outbound",
                     chunk=1,
                     timestamp=0,
-                    pcm16=active_pcmu,
+                    pcm16=active_l16,
                 )
             )
             ws.send_text(
@@ -1660,7 +1662,10 @@ def test_monitor_route_measures_only_outbound_pcmu(tmp_path: Path) -> None:
         assert controller.failure is None
         assert acoustic_probe.AGENT_CHANNEL in controller.media_ready_ns
         assert controller.capture is not None
-        assert len(controller.capture.tracks[acoustic_probe.AGENT_CHANNEL]) == 640
+        assert (
+            bytes(controller.capture.tracks[acoustic_probe.AGENT_CHANNEL])
+            == active_l16
+        )
         assert controller.monitor_integrity is not None
         assert not controller.monitor_integrity.ordering.unresolved
         rows = [
@@ -1673,7 +1678,7 @@ def test_monitor_route_measures_only_outbound_pcmu(tmp_path: Path) -> None:
             acoustic_probe.AGENT_CHANNEL,
             "monitor_inbound_unmeasured",
         ]
-        assert rows[0]["source_payload_bytes"] == 160
+        assert rows[0]["source_payload_bytes"] == 640
         assert rows[0]["payload_bytes"] == 640
         assert rows[1]["source_payload_bytes"] == 156
 
@@ -1693,7 +1698,7 @@ def test_monitor_route_rejects_unexpected_outbound_frame_size(
                 headers={"x-telnyx-streaming-auth-token": token},
             ) as ws,
         ):
-            ws.send_text(start_raw("route-call", encoding="PCMU", sample_rate=8_000))
+            ws.send_text(start_raw("route-call"))
             ws.send_text(
                 probe_media_raw(
                     sequence=2,

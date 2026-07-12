@@ -436,13 +436,18 @@ one bidirectional stream; it does not restrict an additional receive-only
 stream.
 
 The corrected topology therefore adds a third authenticated socket: a
-receive-only PCMU/8 kHz `both_tracks` monitor stream on the agent leg,
-started with the probe stream once the bridge exists. Measured channel B is
-now the monitor stream's provider-outbound track — the audio Telnyx delivers
-toward the agent leg — decoded with the same reviewed G.711 normalization and
-subject to the same exact 160-byte framing gate as channel A. The two measured
-channels become symmetric: each is a leg's receive-only provider-outbound
-track, meaning the audio that leg's party hears. Under `opposite`, the
+receive-only `both_tracks` monitor stream on the agent leg, started with the
+probe stream once the bridge exists. Measured channel B is now the monitor
+stream's provider-outbound track — the audio Telnyx delivers toward the agent
+leg. The design initially requested PCMU as on the probe leg, but attempt 23
+proved the agent leg's receive-only stream delivers the leg's native
+L16/16 kHz and does not honor a PCMU transcode request, so the monitor sends
+no codec override and gates an exact L16/16 kHz/mono start with an exact
+640-byte outbound framing gate and no normalization. Channel B therefore
+carries native-rate PCM while channel A retains the reviewed G.711
+normalization. The two measured channels remain directionally symmetric: each
+is a leg's receive-only provider-outbound track, meaning the audio that leg's
+party hears. Under `opposite`, the
 greeting and later response are expected only on channel A, and the delivered
 fixture only on channel B. The agent leg's bidirectional socket keeps feeding
 provider-inbound audio to the unchanged VoiceAgent and retains its exact L16
@@ -456,11 +461,12 @@ provider source. Acoustic roles are still proven jointly from waveform
 evidence; mirrored or recirculated activity remains fail-closed. No detector
 threshold, silence requirement, time bound, or promotion gate was changed.
 
-Openly recorded unknowns for the next bounded attempt: whether Telnyx accepts
-a second, receive-only stream on a leg that already carries the bidirectional
-stream (a rejection fails closed as `stream_start_failed`), and whether
-delivered fixture audio surfaces on the monitor's outbound track as the
-attempt-22 channel-A evidence predicts.
+Attempt 23 resolved the first open unknown: Telnyx accepts the second,
+receive-only stream on a leg that already carries the bidirectional stream,
+and its authenticated start arrived normally. The remaining unknowns for the
+next bounded attempt are whether delivered fixture audio surfaces on the
+monitor's outbound track as the attempt-22 channel-A evidence predicts, and
+whether that track supplies frame coverage outside active delivery.
 
 ## Live attempt log
 
@@ -675,6 +681,21 @@ attempt-22 channel-A evidence predicts.
   evidence that the outbound track supplies frame coverage outside active
   playback.
 
+- 2026-07-12, authorized iterative attempt 23 (`target_legs=opposite`, revision
+  `ef4e3ea`): **NO-GO — `media_format_mismatch`**. The first monitor-topology
+  call. Telnyx accepted the second, receive-only stream on the agent leg — the
+  attempt's primary open unknown — and delivered its authenticated start about
+  600 ms after the bridge. The sanitized start metadata showed the monitor
+  stream was L16/16 kHz/mono despite the PCMU transcode request, and the exact
+  PCMU gate failed closed before the agent greeting, any media capture, or
+  fixture arming. Both legs were hung up, exact agent-webhook restoration was
+  verified, and the tunnel was stopped. Determination: the agent leg's
+  receive-only stream inherits the leg's native L16 media context and does not
+  honor codec overrides, unlike the PSTN probe leg. The monitor gate was
+  corrected offline to exact L16/16 kHz with an exact 640-byte outbound
+  framing gate and no normalization; channel B gains native-rate fidelity.
+  No detector threshold, time bound, or promotion gate was changed.
+
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
 diagnostic WAVs under the documented exception. No mapped promotion track WAVs,
@@ -713,6 +734,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized unchanged full-transport retry retained.
 - [x] One authorized whole-buffer full-transport retry retained.
 - [x] One authorized opposite-target full-transport attempt retained.
+- [x] One authorized monitor-topology format attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

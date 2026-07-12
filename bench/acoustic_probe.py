@@ -91,9 +91,12 @@ FRAME_MS = 20
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
-# One 20 ms PCMU frame at 8 kHz: both measured receive-only channels share
-# this exact framing gate.
+# One 20 ms PCMU frame at 8 kHz: the measured probe channel's framing gate.
 PCMU_FRAME_BYTES = 160
+# One 20 ms L16 frame at 16 kHz: the measured monitor channel's framing gate.
+# Attempt 23 proved the agent leg's receive-only stream delivers the leg's
+# native L16/16 kHz and does not honor a PCMU transcode request.
+L16_FRAME_BYTES = FRAME_MS * SAMPLE_RATE * SAMPLE_WIDTH // 1_000
 PACING_TOLERANCE_NS = 10_000_000
 AUTH_HANDSHAKE_TIMEOUT_SECONDS = 2.0
 FIXTURE_TOKEN_TTL_SECONDS = 15
@@ -940,12 +943,14 @@ class ProbeController:
             "stream_track": "both_tracks",
             "stream_auth_token": token,
         }
-        # A monitor stream is receive-only by definition; only the probe leg
-        # ever legitimately toggles between the receive-only and legacy
-        # bidirectional payloads.
-        if role == "monitor" or (role == "probe" and self.config.probe_receive_only):
+        # A monitor stream is receive-only by definition and takes the agent
+        # leg's native L16 format (attempt 23: a PCMU transcode request is
+        # not honored there), so it sends no codec override. Only the probe
+        # leg toggles between the receive-only PCMU and legacy bidirectional
+        # payloads.
+        if role == "probe" and self.config.probe_receive_only:
             payload["stream_codec"] = "PCMU"
-        else:
+        elif role != "monitor":
             payload.update(
                 {
                     "stream_bidirectional_mode": "rtp",
@@ -1053,17 +1058,31 @@ class ProbeController:
             },
             "measured_media_format": (
                 {
-                    "encoding": "PCMU",
-                    "sample_rate": 8_000,
-                    "channels": CHANNELS,
-                    "analysis_sample_rate": SAMPLE_RATE,
-                    "normalization": "g711_ulaw_zero_order_hold",
+                    PROBE_CHANNEL: {
+                        "encoding": "PCMU",
+                        "sample_rate": 8_000,
+                        "channels": CHANNELS,
+                        "analysis_sample_rate": SAMPLE_RATE,
+                        "normalization": "g711_ulaw_zero_order_hold",
+                    },
+                    AGENT_CHANNEL: {
+                        "encoding": "L16",
+                        "sample_rate": SAMPLE_RATE,
+                        "channels": CHANNELS,
+                    },
                 }
                 if self.config.probe_receive_only
                 else {
-                    "encoding": "L16",
-                    "sample_rate": SAMPLE_RATE,
-                    "channels": CHANNELS,
+                    PROBE_CHANNEL: {
+                        "encoding": "L16",
+                        "sample_rate": SAMPLE_RATE,
+                        "channels": CHANNELS,
+                    },
+                    AGENT_CHANNEL: {
+                        "encoding": "L16",
+                        "sample_rate": SAMPLE_RATE,
+                        "channels": CHANNELS,
+                    },
                 }
             ),
             "greeting_tts_decode_mode": (
@@ -2729,8 +2748,8 @@ def create_app(
                         )
                         validate_media_format(
                             event.media_format,
-                            encoding="PCMU",
-                            sample_rate=8_000,
+                            encoding="L16",
+                            sample_rate=SAMPLE_RATE,
                             channels=CHANNELS,
                         )
                         controller.mark_media_ready(
@@ -2739,7 +2758,7 @@ def create_app(
                     elif isinstance(event, MediaFrame):
                         if (
                             event.track == "outbound"
-                            and len(event.pcm16) != PCMU_FRAME_BYTES
+                            and len(event.pcm16) != L16_FRAME_BYTES
                         ):
                             controller.artifacts.append_jsonl(
                                 "events.jsonl",
@@ -2755,9 +2774,6 @@ def create_app(
                             )
                             raise ProbeProtocolError("media_format_mismatch")
                         monitor_integrity.append(event)
-                        normalized = replace(
-                            event, pcm16=decode_pcmu_8k_to_pcm16_16k(event.pcm16)
-                        )
                         measurement_channel = (
                             AGENT_CHANNEL
                             if event.track == "outbound"
@@ -2766,10 +2782,10 @@ def create_app(
                         if event.track == "outbound":
                             capture.append(
                                 AGENT_CHANNEL,
-                                replace(normalized, sequence_number=event.chunk),
+                                replace(event, sequence_number=event.chunk),
                             )
                         metadata = _frame_metadata(
-                            normalized, channel=measurement_channel
+                            event, channel=measurement_channel
                         )
                         metadata["source_payload_bytes"] = len(event.pcm16)
                         controller.artifacts.append_jsonl(
