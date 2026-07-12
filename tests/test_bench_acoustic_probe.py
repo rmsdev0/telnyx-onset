@@ -19,6 +19,7 @@ import bench.acoustic_probe as acoustic_probe
 from bench.acoustic_probe import (
     BenchConfig,
     Fixture,
+    GreetingObservedMedia,
     PacingSummary,
     ProbeController,
     ProbeState,
@@ -41,6 +42,8 @@ from onset.settings import Settings
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from onset.media import MediaStream
 
 
 def write_wav(
@@ -279,6 +282,78 @@ async def test_watchdog_greeting_deadline_starts_at_delayed_measurement_ready(
         acoustic_probe.MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
     )
     assert controller.failure == "agent_audio_not_observed"
+
+
+@pytest.mark.asyncio
+async def test_watchdog_resets_full_horizon_at_first_greeting_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(tmp_path)
+    fake = FakeCallControl(cfg.settings)
+    clock = FakeClock()
+    controller = ProbeController(cfg, cast("SafeCallControl", fake), clock=clock)
+    controller.leg_a = "memory-leg-a"
+    controller.leg_b = "memory-leg-b"
+    controller.states.extend(
+        (
+            ProbeState.LEGS_ANSWERED,
+            ProbeState.BRIDGED,
+            ProbeState.STREAM_CONNECTED,
+            ProbeState.MEDIA_FORMAT_VALIDATED,
+        )
+    )
+    controller.mark_media_ready(acoustic_probe.PROBE_CHANNEL, clock.now)
+    controller.mark_media_ready(acoustic_probe.AGENT_CHANNEL, clock.now)
+    greeting_start: int | None = None
+
+    async def advance(_: float) -> None:
+        nonlocal greeting_start
+        clock.now += 1_000_000_000
+        if greeting_start is None and clock.now == 6_000_000_000:
+            controller.mark_greeting_started()
+            greeting_start = clock.now
+        if greeting_start is not None and clock.now < greeting_start + (
+            acoustic_probe.MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
+        ):
+            assert controller.failure is None
+
+    monkeypatch.setattr(asyncio, "sleep", advance)
+    await controller.watchdog()
+    assert greeting_start == 6_000_000_000
+    assert clock.now == greeting_start + (
+        acoustic_probe.MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
+    )
+    assert controller.failure == "agent_audio_not_observed"
+
+
+@pytest.mark.asyncio
+async def test_greeting_media_adapter_marks_only_first_audio_frame() -> None:
+    calls: list[str] = []
+
+    class Inner:
+        def begin_utterance(self) -> int:
+            return 7
+
+        async def send_audio_frame(self, epoch: int, frame: bytes) -> None:
+            calls.append(f"frame:{epoch}:{len(frame)}")
+
+        async def send_mark(self, epoch: int, name: str) -> None:
+            calls.append(f"mark:{epoch}:{name}")
+
+        async def flush(self) -> None:
+            calls.append("flush")
+
+        async def aclose(self) -> None:
+            calls.append("close")
+
+    adapter = GreetingObservedMedia(
+        cast("MediaStream", Inner()), lambda: calls.append("first")
+    )
+    assert adapter.begin_utterance() == 7
+    await adapter.send_audio_frame(7, b"a")
+    await adapter.send_audio_frame(7, b"bb")
+    await adapter.send_mark(7, "done")
+    assert calls == ["first", "frame:7:1", "frame:7:2", "mark:7:done"]
 
 
 @pytest.mark.asyncio
@@ -614,6 +689,7 @@ def send_cross_leg_pair(
 ) -> None:
     capture = controller.capture_after_authentication()
     controller.mark_media_ready(acoustic_probe.AGENT_CHANNEL, time.monotonic_ns())
+    controller.mark_greeting_started()
     state["agent_chunk"] += 1
     capture.append(
         acoustic_probe.AGENT_CHANNEL,

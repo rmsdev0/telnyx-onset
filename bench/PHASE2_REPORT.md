@@ -8,9 +8,11 @@ The offline remediation is implemented and tested. The original three attempts
 could not expose two tracks on one socket. A separately authorized fourth call
 exposed and corrected a transient dynamic-end handling error. A fifth corrected
 call captured both channels for the hard call duration but never completed
-greeting-track selection. No track mapping, fixture match, manual waveform
-review, detector calibration, or empirical GO was produced. Phase 3 remains
-blocked.
+greeting-track selection. A sixth diagnostic run reached greeting selection and
+fixture transmission, but proved that pre-greeting setup audio had been selected
+before the actual VoiceAgent greeting completed. No fixture match, manual
+waveform review, detector calibration, or empirical GO was produced. Phase 3
+remains blocked.
 
 ## Repository and scope
 
@@ -183,6 +185,11 @@ fix. It verified the exact readiness-relative deadline, unchanged 20 ms
 backdated detector result, at-most-180 ms control delay, full-cap stress bound,
 and exclusion of PCM/content from the new metadata fields.
 
+An independent review of the sixth call confirmed empirical **NO-GO** and
+returned **GO** for the bench-only causal greeting-output gate. It verified that
+candidate analysis, the explicit horizon, Window A, and final summary all begin
+at the first VoiceAgent audio frame while production modules remain unchanged.
+
 ## Manual review procedure
 
 After a separately authorized live run, inspect only its ignored local run
@@ -221,9 +228,17 @@ This is waveform agreement validation, not a human-perception measurement.
   preserves the detector's 20 ms backdated sample boundary, adds at most 180 ms
   of recognition/control delay, and bounds worst-case analysis work without
   changing any frozen boundary.
+- The next diagnostic run selected channel B from a short setup burst, confirmed
+  a false natural stop, and began fixture transmission while the real greeting
+  was still being generated/injected. It captured 199 channel-A and 255
+  channel-B frames. After stimulus start channel A had zero active frames while
+  channel B had 167, then matching failed. The bench-only media adapter now
+  records the first actual VoiceAgent output frame and anchors greeting analysis,
+  Window A, and the full 15-second horizon to that causal event; pre-greeting
+  media is excluded.
 - Stable track separation and track-to-leg orientation remain unproven because
-  both the fourth and fifth calls ended before greeting selection or fixture
-  transmission.
+  the fourth and fifth calls ended before fixture transmission and the sixth
+  selected setup audio rather than the real greeting.
 - Framing jitter and ordering across a complete capture.
 - Returned-fixture correlation under the live topology.
 - Cross-feed and overlap behavior.
@@ -316,6 +331,13 @@ gate.
   so the fixture was not transmitted and no mapping or waveform artifact was
   written. Both legs were hung up. The manifest `attempt_number: 1` again means
   the sole attempt in this CLI process; this report uses cumulative ordinal 5.
+- 2026-07-12, authorized iterative attempt 6 (`target_legs=opposite`, revision
+  `6e967b4`): **NO-GO — `fixture_match_missing`**. The run selected channel B,
+  confirmed a natural stop, transmitted the complete fixture, and received its
+  mark, but did so before the real greeting finished injection. Derived evidence
+  showed channel A remained quiet and channel B became strongly active. No
+  fixture correlation or waveform artifact was produced; both legs were hung
+  up. The causal greeting-output gate was then added offline.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Failed runs produced sanitized metadata only; no mapped
@@ -337,6 +359,7 @@ track WAVs, comparative results, or measurement profile were produced.
 - [x] Three separately authorized bounded live attempts retained.
 - [x] One separately authorized post-cap dual-socket attempt retained.
 - [x] One separately authorized corrected dual-socket retry retained.
+- [x] One authorized iterative diagnostic fixture attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

@@ -298,6 +298,33 @@ class TextSender(Protocol):
     async def send_text(self, data: str) -> None: ...
 
 
+class GreetingObservedMedia:
+    """Bench-only MediaPort adapter that exposes the first greeting frame."""
+
+    def __init__(self, inner: MediaStream, on_first_audio: Callable[[], None]) -> None:
+        self._inner = inner
+        self._on_first_audio = on_first_audio
+        self._observed = False
+
+    def begin_utterance(self) -> int:
+        return self._inner.begin_utterance()
+
+    async def send_audio_frame(self, epoch: int, frame: bytes) -> None:
+        if not self._observed:
+            self._observed = True
+            self._on_first_audio()
+        await self._inner.send_audio_frame(epoch, frame)
+
+    async def send_mark(self, epoch: int, name: str) -> None:
+        await self._inner.send_mark(epoch, name)
+
+    async def flush(self) -> None:
+        await self._inner.flush()
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 async def send_fixture_paced(
     sender: TextSender,
     fixture: Fixture,
@@ -456,6 +483,7 @@ class ProbeController:
         self.measurement_ready = asyncio.Event()
         self.media_ready_ns: dict[str, int] = {}
         self.measurement_start_ns: int | None = None
+        self.greeting_started_ns: int | None = None
         self.probe_socket_active = False
         self.agent_socket_active = False
         self.capture: CrossLegCapture | None = None
@@ -493,6 +521,18 @@ class ProbeController:
             self.measurement_start_ns = max(self.media_ready_ns.values())
             self.measurement_ready.set()
 
+    def mark_greeting_started(self) -> None:
+        if self.greeting_started_ns is not None:
+            return
+        self.greeting_started_ns = self.clock.monotonic_ns()
+        self.artifacts.append_jsonl(
+            "events.jsonl",
+            {
+                "event": "greeting_output_started",
+                "host_monotonic_ns": self.greeting_started_ns,
+            },
+        )
+
     def transition(self, state: ProbeState) -> None:
         if state not in self.states:
             self.states.append(state)
@@ -519,7 +559,10 @@ class ProbeController:
                 ProbeState.AGENT_AUDIO_OBSERVED not in self.states
                 and self.measurement_start_ns is not None
             ):
-                if now_ns >= self.measurement_start_ns + (
+                greeting_deadline_origin = (
+                    self.greeting_started_ns or self.measurement_start_ns
+                )
+                if now_ns >= greeting_deadline_origin + (
                     MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
                 ):
                     self.fail("agent_audio_not_observed")
@@ -1499,22 +1542,23 @@ def create_app(
                         if (
                             agent_track is None
                             and controller.measurement_ready.is_set()
+                            and controller.greeting_started_ns is not None
                             and probe_media_frames % GREETING_ANALYSIS_INTERVAL_FRAMES
                             == 0
                         ):
-                            if controller.measurement_start_ns is None:
+                            if controller.greeting_started_ns is None:
                                 raise ProbeProtocolError(
                                     "cross_channel_alignment_failed"
                                 )
                             candidate, analyses, ambiguous = _candidate_agent_track(
                                 capture,
                                 config.detector,
-                                start_ns=controller.measurement_start_ns,
+                                start_ns=controller.greeting_started_ns,
                                 end_ns=(
-                                    controller.measurement_start_ns
+                                    controller.greeting_started_ns
                                     + MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
                                     if frame.host_receive_monotonic_ns
-                                    >= controller.measurement_start_ns
+                                    >= controller.greeting_started_ns
                                     + MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
                                     else None
                                 ),
@@ -1534,7 +1578,7 @@ def create_app(
                                         "natural_stop_not_observed"
                                     )
                                 aligned = _aligned_host_window(
-                                    capture, controller.measurement_start_ns
+                                    capture, controller.greeting_started_ns
                                 )
                                 if aligned is None:
                                     continue
@@ -1620,7 +1664,7 @@ def create_app(
                                 )
                             elif (
                                 frame.host_receive_monotonic_ns
-                                >= controller.measurement_start_ns
+                                >= controller.greeting_started_ns
                                 + MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
                             ):
                                 raise ProbeProtocolError("agent_audio_not_observed")
@@ -1964,14 +2008,14 @@ def create_app(
             if natural_result is None:
                 raise ProbeProtocolError("natural_stop_not_observed")
             if (
-                controller.measurement_start_ns is None
+                controller.greeting_started_ns is None
                 or natural_silence_ns is None
                 or natural_confirmation_ns is None
             ):
                 raise ProbeProtocolError("cross_channel_alignment_failed")
             window_a = _aligned_host_window(
                 capture,
-                controller.measurement_start_ns,
+                controller.greeting_started_ns,
                 natural_silence_ns,
                 strict=True,
             )
@@ -2142,10 +2186,13 @@ def create_app(
                         lead_frames=config.settings.inject_lead_frames,
                     )
                     media.start()
+                    observed_media = GreetingObservedMedia(
+                        media, controller.mark_greeting_started
+                    )
                     agent = VoiceAgent(
                         config.settings,
                         controller.call_control.call(event.call_control_id),
-                        media,
+                        observed_media,
                         RESTAURANT_CONFIG,
                     )
                     agent.set_call_info(event.call_control_id, event.from_number)
