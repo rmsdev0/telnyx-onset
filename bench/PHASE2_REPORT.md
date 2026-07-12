@@ -82,8 +82,10 @@ response. One and only one other track must match the known fixture.
 
 Fixture correspondence uses an explicit, deterministic 20 ms energy-envelope
 correlation over unchanged mono PCM16/16 kHz samples. Alignment is searched only
-over the finite 0–2000 ms range; media is not resampled, reordered, gap-filled,
-or silently reconstructed. The post-stimulus boundary opens only after the
+over the finite 0–2000 ms range; L16 media is not resampled, reordered,
+gap-filled, or silently reconstructed. The receive-only PCMU topology applies
+the separately reviewed deterministic normalization described below. The
+post-stimulus boundary opens only after the
 matched returned fixture ends and 100 ms of separating silence is observed on
 both tracks. Window D must contain new activity on the selected agent track and
 no mirrored active response on the selected stimulus track.
@@ -142,7 +144,8 @@ bodies, and authorization values are excluded.
 Sanitized frame metadata records per-frame RMS dBFS, peak absolute level, and
 clipping count. For the final authorized synthetic diagnostic only, exact
 bounded channel PCM may also be written as neutral-name WAVs after both
-authenticated sockets pass call binding and L16/16 kHz/mono validation. These
+authenticated sockets pass call binding and their role-specific exact-format
+validation. These
 ignored local 0600 files are diagnostic evidence, never committed or sufficient
 for promotion; persistence is atomic, no-follow, best-effort, and cannot block
 call teardown. No transcripts are retained.
@@ -308,6 +311,17 @@ response chunk on the same monotonic clock. It measures:
 - neutral channel A: provider `outbound` media from the probe-leg socket;
 - neutral channel B: provider `inbound` media from the agent-leg socket.
 
+The receive-only provider surface does not honor L16 transcoding: the observed
+start format was G.722/8 kHz/mono while the agent remained L16/16 kHz/mono. The
+corrected request uses Telnyx's supported PCMU transcode target and requires an
+exact PCMU/8 kHz/mono start. A local G.711 decoder maps each mu-law byte to its
+standard signed PCM value and duplicates each 8 kHz sample once to form a 16 kHz
+analysis timeline. This zero-order hold preserves 20 ms frame duration and
+introduces no interpolated energy; the probe's acoustic boundary resolution
+remains the original 8 kHz sample period. Known G.711 extrema/silence vectors,
+frame size, route behavior, and metadata are tested. Any other start format
+still fails closed.
+
 The provider labels are used only to ensure that agent provider-inbound audio
 alone is fed to the unchanged VoiceAgent. Probe provider-inbound and agent
 provider-outbound events remain in socket-integrity diagnostics but are
@@ -457,6 +471,14 @@ gate.
   and the tunnel was stopped. A sanitized format-observation event is added
   offline so the next bounded run can distinguish provider codec/rate/channel
   behavior without weakening the gate.
+- 2026-07-12, authorized iterative attempt 13 (`target_legs=opposite`, revision
+  `615a352`): **NO-GO — `media_format_mismatch`**. Sanitized authenticated start
+  metadata proved the agent socket was L16/16 kHz/mono and the receive-only
+  probe socket was G.722/8 kHz/mono despite requesting L16. The mismatch failed
+  before agent startup, media processing, or fixture transmission. Both legs
+  were hung up, exact webhook restoration was verified, and the tunnel was
+  stopped. PCMU/8 kHz normalization was then implemented offline; this run is
+  not reinterpreted under the new decoder.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -486,6 +508,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized same-app probe-outbound attempt retained.
 - [x] One authorized separate-app probe-outbound attempt retained.
 - [x] One authorized receive-only format attempt retained.
+- [x] One authorized receive-only sanitized format observation retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

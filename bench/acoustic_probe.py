@@ -798,7 +798,7 @@ class ProbeController:
             "stream_auth_token": token,
         }
         if role == "probe" and self.config.probe_receive_only:
-            payload["stream_codec"] = "L16"
+            payload["stream_codec"] = "PCMU"
         else:
             payload.update(
                 {
@@ -1159,6 +1159,33 @@ def _samples(pcm16: bytes) -> array[int]:
     values = array("h")
     values.frombytes(pcm16)
     return values
+
+
+def decode_pcmu_8k_to_pcm16_16k(payload: bytes) -> bytes:
+    """Decode G.711 mu-law and normalize 8 kHz samples to 16 kHz PCM16.
+
+    Each decoded sample is duplicated, a deterministic zero-order hold that
+    preserves the provider sample boundary and frame duration without inventing
+    intermediate energy.
+    """
+    if not payload:
+        raise ProbeProtocolError("bad_media_payload")
+    decoded = bytearray(len(payload) * 4)
+    offset = 0
+    for encoded in payload:
+        value = (~encoded) & 0xFF
+        sign = value & 0x80
+        exponent = (value >> 4) & 0x07
+        mantissa = value & 0x0F
+        sample = ((mantissa << 3) + 0x84) << exponent
+        sample -= 0x84
+        if sign:
+            sample = -sample
+        little = int(sample).to_bytes(2, "little", signed=True)
+        decoded[offset : offset + 2] = little
+        decoded[offset + 2 : offset + 4] = little
+        offset += 4
+    return bytes(decoded)
 
 
 def _mean_square(pcm16: bytes) -> float:
@@ -1625,8 +1652,14 @@ def create_app(
                         )
                         validate_media_format(
                             frame.media_format,
-                            encoding="L16",
-                            sample_rate=SAMPLE_RATE,
+                            encoding=(
+                                "PCMU" if config.probe_receive_only else "L16"
+                            ),
+                            sample_rate=(
+                                8_000
+                                if config.probe_receive_only
+                                else SAMPLE_RATE
+                            ),
                             channels=CHANNELS,
                         )
                         actual_format = frame.media_format
@@ -1648,7 +1681,17 @@ def create_app(
                             raise ProbeProtocolError("bridge_failed") from exc
                         continue
                     if isinstance(frame, MediaFrame):
+                        if config.probe_receive_only and len(frame.pcm16) != 160:
+                            raise ProbeProtocolError("media_format_mismatch")
                         probe_integrity.append(frame)
+                        normalized = (
+                            replace(
+                                frame,
+                                pcm16=decode_pcmu_8k_to_pcm16_16k(frame.pcm16),
+                            )
+                            if config.probe_receive_only
+                            else frame
+                        )
                         probe_media_frames += 1
                         controller.probe_media_frames_received = probe_media_frames
                         measurement_channel = (
@@ -1659,12 +1702,15 @@ def create_app(
                         if frame.track == "outbound":
                             capture.append(
                                 PROBE_CHANNEL,
-                                replace(frame, sequence_number=frame.chunk),
+                                replace(normalized, sequence_number=frame.chunk),
                             )
                             probe_measurement_frames += 1
+                        metadata = _frame_metadata(
+                            normalized, channel=measurement_channel
+                        )
+                        metadata["source_payload_bytes"] = len(frame.pcm16)
                         controller.artifacts.append_jsonl(
-                            "frame_metadata.jsonl",
-                            _frame_metadata(frame, channel=measurement_channel),
+                            "frame_metadata.jsonl", metadata
                         )
                         diagnostic_track = f"probe_{frame.track}"
                         if diagnostic_track not in first_tracks_seen:

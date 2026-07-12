@@ -477,7 +477,7 @@ async def test_receive_only_probe_omits_all_bidirectional_options(
         payload for ccid, _, payload in streams if ccid == "memory-leg-b"
     )
     assert probe_payload["stream_track"] == "both_tracks"
-    assert probe_payload["stream_codec"] == "L16"
+    assert probe_payload["stream_codec"] == "PCMU"
     assert not any(key.startswith("stream_bidirectional") for key in probe_payload)
     assert agent_payload["stream_bidirectional_mode"] == "rtp"
 
@@ -820,7 +820,9 @@ def test_contamination_metric_rejects_mixed_tracks() -> None:
     assert mixed.absolute_waveform_correlation == pytest.approx(1.0)
 
 
-def start_raw(call_id: str, *, encoding: str = "L16") -> str:
+def start_raw(
+    call_id: str, *, encoding: str = "L16", sample_rate: int = 16_000
+) -> str:
     return json.dumps(
         {
             "event": "start",
@@ -830,7 +832,7 @@ def start_raw(call_id: str, *, encoding: str = "L16") -> str:
                 "call_control_id": call_id,
                 "media_format": {
                     "encoding": encoding,
-                    "sample_rate": 16_000,
+                    "sample_rate": sample_rate,
                     "channels": 1,
                 },
             },
@@ -1188,7 +1190,8 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
         probe_receive_only=True,
     )
     app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
-    active = array("h", [8_000] * 320).tobytes()
+    active_pcmu = b"\xa0" * 160
+    silence_pcmu = b"\xff" * 160
     silence = b"\x00\x00" * 320
     with TestClient(app) as client:
         controller: ProbeController = app.state.controller
@@ -1199,7 +1202,7 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
             f"/ws/probe/{controller.run_id}",
             headers={"x-telnyx-streaming-auth-token": token},
         ) as ws:
-            ws.send_text(start_raw("route-call"))
+            ws.send_text(start_raw("route-call", encoding="PCMU", sample_rate=8_000))
             state = {
                 "probe_sequence": 2,
                 "agent_sequence": 2,
@@ -1210,7 +1213,7 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
                 send_cross_leg_pair(
                     ws,
                     controller,
-                    active if index < 5 else silence,
+                    active_pcmu if index < 5 else silence_pcmu,
                     silence,
                     state,
                 )
@@ -1222,6 +1225,24 @@ def test_receive_only_probe_stops_after_proving_returned_greeting(
         assert ProbeState.AGENT_NATURAL_STOP_OBSERVED in controller.states
         assert ProbeState.STIMULUS_STARTED not in controller.states
         assert not (controller.artifacts.path / "send_frames.jsonl").exists()
+        assert controller.probe_integrity is not None
+        assert len(controller.probe_integrity.tracks["outbound"]) == 30 * 160
+        assert controller.capture is not None
+        assert len(controller.capture.tracks[acoustic_probe.PROBE_CHANNEL]) == 30 * 640
+        metadata = [
+            json.loads(line)
+            for line in (controller.artifacts.path / "frame_metadata.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        measured = [row for row in metadata if row["track"] == "channel_a"]
+        assert len(measured) == 30
+        assert all(row["payload_bytes"] == 640 for row in measured)
+        assert all(row["source_payload_bytes"] == 160 for row in measured)
+        with wave.open(
+            str(controller.artifacts.path / "diagnostic_channel_a.wav"), "rb"
+        ) as source:
+            assert source.getparams()[:4] == (1, 2, 16_000, 30 * 320)
 
 
 @pytest.mark.parametrize(
@@ -1883,6 +1904,19 @@ def test_fixture_reference_search_follows_delayed_returned_audio() -> None:
     assert match is not None
     assert match.alignment_frames == 3
     assert match.end_byte == len(queued)
+
+
+def test_pcmu_decode_matches_g711_vectors_and_normalizes_duration() -> None:
+    decoded = array(
+        "h",
+        acoustic_probe.decode_pcmu_8k_to_pcm16_16k(
+            bytes((0xFF, 0x7F, 0x80, 0x00))
+        ),
+    )
+    assert decoded.tolist() == [0, 0, 0, 0, 32124, 32124, -32124, -32124]
+    frame = acoustic_probe.decode_pcmu_8k_to_pcm16_16k(b"\xff" * 160)
+    assert len(frame) == 640
+    assert frame == b"\x00\x00" * 320
 
 
 def test_joint_track_selection_waits_for_common_interval_and_rejects_twins() -> None:
