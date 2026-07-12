@@ -29,7 +29,7 @@ from bench.acoustic_probe import (
     match_fixture_reference,
     send_fixture_paced,
 )
-from bench.acoustic_stop import DetectorConfig
+from bench.acoustic_stop import DetectorConfig, analyze_acoustic_stop
 from bench.media_capture import (
     TOKEN_TTL_NS,
     BoundedCapture,
@@ -238,6 +238,47 @@ def config(tmp_path: Path) -> BenchConfig:
         fixture=fixture,
         artifacts_root=tmp_path,
     )
+
+
+@pytest.mark.asyncio
+async def test_watchdog_greeting_deadline_starts_at_delayed_measurement_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(tmp_path)
+    fake = FakeCallControl(cfg.settings)
+    clock = FakeClock()
+    controller = ProbeController(cfg, cast("SafeCallControl", fake), clock=clock)
+    controller.leg_a = "memory-leg-a"
+    controller.leg_b = "memory-leg-b"
+    controller.states.extend(
+        (
+            ProbeState.LEGS_ANSWERED,
+            ProbeState.BRIDGED,
+            ProbeState.STREAM_CONNECTED,
+            ProbeState.MEDIA_FORMAT_VALIDATED,
+        )
+    )
+    measurement_start: int | None = None
+
+    async def advance(_: float) -> None:
+        nonlocal measurement_start
+        clock.now += 1_000_000_000
+        if measurement_start is None and clock.now == 6_000_000_000:
+            controller.mark_media_ready(acoustic_probe.PROBE_CHANNEL, clock.now)
+            controller.mark_media_ready(acoustic_probe.AGENT_CHANNEL, clock.now)
+            measurement_start = clock.now
+        if measurement_start is not None and clock.now < measurement_start + (
+            acoustic_probe.MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
+        ):
+            assert controller.failure is None
+
+    monkeypatch.setattr(asyncio, "sleep", advance)
+    await controller.watchdog()
+    assert measurement_start == 6_000_000_000
+    assert clock.now == measurement_start + (
+        acoustic_probe.MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
+    )
+    assert controller.failure == "agent_audio_not_observed"
 
 
 @pytest.mark.asyncio
@@ -774,7 +815,7 @@ def test_probe_route_rejects_expired_mismatched_and_reused_auth(
 
 
 def test_probe_route_both_tracks_rejects_queued_fixture_as_response(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = config(tmp_path)
     fixture, fixture_frames = patterned_fixture()
@@ -788,6 +829,15 @@ def test_probe_route_both_tracks_rejects_queued_fixture_as_response(
         artifacts_root=tmp_path / "route-artifacts",
     )
     app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    analysis_calls = 0
+    original_candidate = acoustic_probe._candidate_agent_track
+
+    def counted_candidate(*args: Any, **kwargs: Any) -> Any:
+        nonlocal analysis_calls
+        analysis_calls += 1
+        return original_candidate(*args, **kwargs)
+
+    monkeypatch.setattr(acoustic_probe, "_candidate_agent_track", counted_candidate)
     active = array("h", [8_000] * 320).tobytes()
     silence = b"\x00\x00" * 320
     with TestClient(app) as client:
@@ -811,6 +861,7 @@ def test_probe_route_both_tracks_rejects_queued_fixture_as_response(
 
             for index in range(30):
                 send_pair(active if index < 5 else silence, silence)
+            assert analysis_calls == 3
             sent = []
             for _ in fixture_frames:
                 sent.append(ws.receive_json())
@@ -1554,3 +1605,123 @@ def test_fixture_separation_excludes_energetic_final_frame(
         assert acoustic_probe._rms_dbfs(bytes(capture.tracks[track][start:end])) == (
             -float("inf")
         )
+
+
+def test_cadenced_greeting_analysis_preserves_boundary_with_bounded_delay() -> None:
+    capture = CrossLegCapture(
+        (acoustic_probe.PROBE_CHANNEL, acoustic_probe.AGENT_CHANNEL),
+        max_bytes_per_channel=1_000_000,
+        max_event_rows=1_000,
+    )
+    active = array("h", [8_000] * 320).tobytes()
+    silence = b"\x00\x00" * 320
+    base = 1_000_000_000
+    earliest: tuple[int, Any] | None = None
+    cadenced: tuple[int, Any] | None = None
+    for index in range(40):
+        for channel, delay_ns, payload in (
+            (acoustic_probe.AGENT_CHANNEL, 1_000_000, silence),
+            (
+                acoustic_probe.PROBE_CHANNEL,
+                0,
+                active if 1 <= index < 6 else silence,
+            ),
+        ):
+            capture.append(
+                channel,
+                MediaFrame(
+                    index + 1,
+                    channel,
+                    "inbound",
+                    index + 1,
+                    index * 20,
+                    payload,
+                    base + index * 20_000_000 + delay_ns,
+                ),
+            )
+        candidate, analyses, _ = acoustic_probe._candidate_agent_track(
+            capture, DetectorConfig(), start_ns=base
+        )
+        if candidate is not None and earliest is None:
+            earliest = (index + 1, analyses[candidate].result)
+        if (index + 1) % acoustic_probe.GREETING_ANALYSIS_INTERVAL_FRAMES == 0:
+            candidate, analyses, _ = acoustic_probe._candidate_agent_track(
+                capture, DetectorConfig(), start_ns=base
+            )
+            if candidate is not None and cadenced is None:
+                cadenced = (index + 1, analyses[candidate].result)
+    assert earliest is not None and cadenced is not None
+    assert cadenced[0] - earliest[0] <= (
+        acoustic_probe.GREETING_ANALYSIS_INTERVAL_FRAMES - 1
+    )
+    assert cadenced[1] == earliest[1]
+
+
+def test_greeting_analysis_work_is_bounded_at_full_call_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = CrossLegCapture(
+        (acoustic_probe.PROBE_CHANNEL, acoustic_probe.AGENT_CHANNEL),
+        max_bytes_per_channel=4_000_000,
+        max_event_rows=7_000,
+    )
+    silence = b"\x00\x00" * 320
+    base = 1_000_000_000
+    deadline = base + acoustic_probe.MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
+    analyzed_bytes: list[int] = []
+    original = analyze_acoustic_stop
+
+    def counted_analysis(pcm16: bytes, detector: DetectorConfig) -> Any:
+        analyzed_bytes.append(len(pcm16))
+        return original(pcm16, detector)
+
+    monkeypatch.setattr(acoustic_probe, "analyze_acoustic_stop", counted_analysis)
+    started = time.perf_counter()
+    for index in range(3_000):
+        for channel, delay_ns in (
+            (acoustic_probe.AGENT_CHANNEL, 1_000_000),
+            (acoustic_probe.PROBE_CHANNEL, 0),
+        ):
+            capture.append(
+                channel,
+                MediaFrame(
+                    index + 1,
+                    channel,
+                    "inbound",
+                    index + 1,
+                    index * 20,
+                    silence,
+                    base + index * 20_000_000 + delay_ns,
+                ),
+            )
+        frame_count = index + 1
+        if frame_count <= 760 and (
+            frame_count % acoustic_probe.GREETING_ANALYSIS_INTERVAL_FRAMES == 0
+        ):
+            receive_ns = base + index * 20_000_000
+            acoustic_probe._candidate_agent_track(
+                capture,
+                DetectorConfig(),
+                start_ns=base,
+                end_ns=deadline if receive_ns >= deadline else None,
+            )
+    elapsed = time.perf_counter() - started
+    assert len(analyzed_bytes) == 152
+    assert max(analyzed_bytes) <= (
+        acoustic_probe.MAX_GREETING_ANALYSIS_SECONDS * 16_000 * 2
+    )
+    assert elapsed < 2.0
+
+
+def test_sanitized_frame_metadata_has_energy_but_no_pcm() -> None:
+    payload = array("h", [0, 1_000, -32_768, 32_767]).tobytes()
+    frame = MediaFrame(2, "stream", "inbound", 1, 0, payload, 123)
+    metadata = acoustic_probe._frame_metadata(frame, channel="channel")
+    assert metadata["payload_bytes"] == len(payload)
+    assert metadata["rms_dbfs"] == pytest.approx(acoustic_probe._rms_dbfs(payload))
+    assert metadata["peak_abs"] == 32_768
+    assert metadata["clipped_samples"] == 2
+    serialized = json.dumps(metadata)
+    assert "pcm16" not in metadata
+    assert "payload" not in metadata
+    assert base64.b64encode(payload).decode() not in serialized

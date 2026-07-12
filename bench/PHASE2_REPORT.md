@@ -6,10 +6,11 @@
 
 The offline remediation is implemented and tested. The original three attempts
 could not expose two tracks on one socket. A separately authorized fourth call
-exercised the dual-socket topology and captured both channels, but stopped
-fail-closed during the greeting on a transient 92.3 ms dynamic-end receive gap.
-No track mapping, fixture match, manual waveform review, detector calibration,
-or empirical GO was produced. Phase 3 remains blocked.
+exposed and corrected a transient dynamic-end handling error. A fifth corrected
+call captured both channels for the hard call duration but never completed
+greeting-track selection. No track mapping, fixture match, manual waveform
+review, detector calibration, or empirical GO was produced. Phase 3 remains
+blocked.
 
 ## Repository and scope
 
@@ -117,6 +118,10 @@ manifest with a named category, sanitized terminal outcome, attempt number, and
 teardown result. Tokens, phone numbers, provider IDs, transcripts, raw error
 bodies, and authorization values are excluded.
 
+Future sanitized frame metadata also records per-frame RMS dBFS, peak absolute
+level, and clipping count. This permits failed-run acoustic diagnosis without
+persisting PCM, WAV audio, transcripts, or content.
+
 The live artifact root is anchored to the module repository at
 `bench/artifacts`, must resolve under the repository's `bench` directory, and
 must match the exact path verified by live preflight. Symlinks and path escapes
@@ -172,6 +177,12 @@ independently reproduced 189/278 channel frames, the 92.318667 ms transient,
 and fixed-helper replay with 187 aligned evaluations, two waits, and zero
 errors. No audio, provider identifier, or secret was required.
 
+An independent review of the fifth call confirmed empirical **NO-GO** and
+returned **GO** for the bounded greeting-horizon and derived-energy evidence
+fix. It verified the exact readiness-relative deadline, unchanged 20 ms
+backdated detector result, at-most-180 ms control delay, full-cap stress bound,
+and exclusion of PCM/content from the new metadata fields.
+
 ## Manual review procedure
 
 After a separately authorized live run, inspect only its ignored local run
@@ -198,8 +209,21 @@ This is waveform agreement validation, not a human-perception measurement.
   endpoints 92.3 ms apart; offline replay after changing that open window to
   wait-for-coverage produced 187 aligned evaluations, two transient waits, and
   zero alignment errors.
+- The corrected retry cleared that transient gate and captured 5,228 frames:
+  2,153 on channel A and 3,075 on channel B, with contiguous chunk counters and
+  320-sample provider timestamp steps. Channel A processed about 43.06 seconds
+  of PCM over 60.59 seconds of host time while channel B processed 61.50 seconds
+  over 60.96 seconds. Code audit found that provisional full-history greeting
+  analysis ran on every channel-A frame, creating quadratic handler work
+  consistent with the observed backlog. The offline correction evaluates that
+  provisional window every ten frames (200 ms) and fails closed after a fixed
+  15-second greeting horizon anchored exactly to dual-media readiness. This
+  preserves the detector's 20 ms backdated sample boundary, adds at most 180 ms
+  of recognition/control delay, and bounds worst-case analysis work without
+  changing any frozen boundary.
 - Stable track separation and track-to-leg orientation remain unproven because
-  the fourth call ended before greeting selection or fixture transmission.
+  both the fourth and fifth calls ended before greeting selection or fixture
+  transmission.
 - Framing jitter and ordering across a complete capture.
 - Returned-fixture correlation under the live topology.
 - Cross-feed and overlap behavior.
@@ -285,6 +309,13 @@ gate.
   a leg had already ended. Its manifest `attempt_number: 1` is the ordinal
   within that one-attempt CLI process; “attempt 4” is the cumulative project
   log ordinal used in this report.
+- 2026-07-12, separately authorized attempt 5 (`target_legs=opposite`, revision
+  `3fd6960`): **NO-GO — `call_hangup`**. The corrected dynamic endpoint waited
+  successfully and both channels remained connected through the hard duration,
+  producing 5,228 sanitized frame rows. Greeting selection did not complete,
+  so the fixture was not transmitted and no mapping or waveform artifact was
+  written. Both legs were hung up. The manifest `attempt_number: 1` again means
+  the sole attempt in this CLI process; this report uses cumulative ordinal 5.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Failed runs produced sanitized metadata only; no mapped
@@ -305,6 +336,7 @@ track WAVs, comparative results, or measurement profile were produced.
 - [x] Offline route/component/adversarial tests.
 - [x] Three separately authorized bounded live attempts retained.
 - [x] One separately authorized post-cap dual-socket attempt retained.
+- [x] One separately authorized corrected dual-socket retry retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

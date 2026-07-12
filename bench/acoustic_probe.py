@@ -92,6 +92,8 @@ PACING_TOLERANCE_NS = 10_000_000
 AUTH_HANDSHAKE_TIMEOUT_SECONDS = 2.0
 SEPARATING_SILENCE_MS = 100
 POST_CONFIRMATION_GUARD_MS = 2 * FRAME_MS
+GREETING_ANALYSIS_INTERVAL_FRAMES = 10
+MAX_GREETING_ANALYSIS_SECONDS = 15
 FIXTURE_ALIGNMENT_SEARCH_MS = 2_000
 MIN_FIXTURE_CORRELATION = 0.85
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -513,6 +515,16 @@ class ProbeController:
             if now_ns >= call_deadline:
                 self.fail("call_hangup")
                 break
+            if (
+                ProbeState.AGENT_AUDIO_OBSERVED not in self.states
+                and self.measurement_start_ns is not None
+            ):
+                if now_ns >= self.measurement_start_ns + (
+                    MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
+                ):
+                    self.fail("agent_audio_not_observed")
+                    break
+                continue
             if now_ns - self.last_transition_ns < state_timeout_ns:
                 continue
             if self.leg_a is None:
@@ -523,7 +535,10 @@ class ProbeController:
                 self.fail("answer_timeout")
             elif ProbeState.BRIDGED not in self.states:
                 self.fail("bridge_failed")
-            elif ProbeState.STREAM_CONNECTED not in self.states:
+            elif (
+                ProbeState.STREAM_CONNECTED not in self.states
+                or self.measurement_start_ns is None
+            ):
                 self.fail("stream_start_failed")
             else:
                 # Media-window timeouts are classified by the probe socket.
@@ -970,9 +985,13 @@ def _fixture_separation_ranges(
 
 
 def _candidate_agent_track(
-    capture: Capture, config: DetectorConfig, *, start_ns: int = 0
+    capture: Capture,
+    config: DetectorConfig,
+    *,
+    start_ns: int = 0,
+    end_ns: int | None = None,
 ) -> tuple[str | None, dict[str, DetectorAnalysis], bool]:
-    ranges = _aligned_host_window(capture, start_ns)
+    ranges = _aligned_host_window(capture, start_ns, end_ns)
     if ranges is None:
         return None, {}, False
     analyses = {
@@ -1266,6 +1285,8 @@ def _write_energy_csv(
 def _frame_metadata(
     frame: MediaFrame, *, channel: str | None = None
 ) -> dict[str, object]:
+    values = _samples(frame.pcm16)
+    rms_dbfs = _rms_dbfs(frame.pcm16)
     return {
         "event": "media",
         "sequence_number": frame.sequence_number,
@@ -1273,6 +1294,9 @@ def _frame_metadata(
         "chunk": frame.chunk,
         "timestamp": frame.timestamp,
         "payload_bytes": len(frame.pcm16),
+        "rms_dbfs": rms_dbfs if math.isfinite(rms_dbfs) else None,
+        "peak_abs": max((abs(int(value)) for value in values), default=0),
+        "clipped_samples": sum(int(value) in {-32_768, 32_767} for value in values),
         "host_receive_monotonic_ns": frame.host_receive_monotonic_ns,
     }
 
@@ -1395,6 +1419,7 @@ def create_app(
         natural_silence_ns: int | None = None
         natural_confirmation_ns: int | None = None
         message_rows = 0
+        probe_media_frames = 0
         first_tracks_seen: set[str] = set()
         if controller.probe_socket_active:
             await ws.close(code=1008)
@@ -1454,6 +1479,7 @@ def create_app(
                         continue
                     if isinstance(frame, MediaFrame):
                         capture.append(PROBE_CHANNEL, frame)
+                        probe_media_frames += 1
                         controller.artifacts.append_jsonl(
                             "frame_metadata.jsonl",
                             _frame_metadata(frame, channel=PROBE_CHANNEL),
@@ -1473,6 +1499,8 @@ def create_app(
                         if (
                             agent_track is None
                             and controller.measurement_ready.is_set()
+                            and probe_media_frames % GREETING_ANALYSIS_INTERVAL_FRAMES
+                            == 0
                         ):
                             if controller.measurement_start_ns is None:
                                 raise ProbeProtocolError(
@@ -1482,6 +1510,14 @@ def create_app(
                                 capture,
                                 config.detector,
                                 start_ns=controller.measurement_start_ns,
+                                end_ns=(
+                                    controller.measurement_start_ns
+                                    + MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
+                                    if frame.host_receive_monotonic_ns
+                                    >= controller.measurement_start_ns
+                                    + MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
+                                    else None
+                                ),
                             )
                             if ambiguous:
                                 raise ProbeProtocolError("track_ambiguous")
@@ -1582,6 +1618,12 @@ def create_app(
                                         ws, config.fixture, clock=controller.clock
                                     )
                                 )
+                            elif (
+                                frame.host_receive_monotonic_ns
+                                >= controller.measurement_start_ns
+                                + MAX_GREETING_ANALYSIS_SECONDS * 1_000_000_000
+                            ):
+                                raise ProbeProtocolError("agent_audio_not_observed")
                         elif stimulus_task is not None and stimulus_task.done():
                             if pacing is None:
                                 try:
