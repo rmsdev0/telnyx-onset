@@ -21,7 +21,9 @@ probe-leg `both_tracks` but received 1,067 inbound and zero outbound frames.
 The subsequent sanitized configuration audit found that the harness number is
 assigned to a separate Call Control application, while the bench had originated
 through the agent application's connection. Correct separate-application
-origination remains untested.
+origination was then tested and produced the same zero-outbound result.
+Bidirectional WebSocket capture is exhausted; receive-only probe streaming plus
+harness-served fixture playback remains under review.
 No fixture match, manual waveform review, detector calibration, or empirical GO
 was produced. Phase 3 remains blocked.
 
@@ -291,14 +293,17 @@ This is waveform agreement validation, not a human-perception measurement.
 ## Post-NO-GO topology correction prepared offline
 
 The inbound-only dual-socket, agent-socket outbound, combined
-agent-`both_tracks`/cross-leg, and same-app probe-outbound hypotheses are
-empirically rejected. The configuration audit found that both the outbound
+agent-`both_tracks`/cross-leg, same-app probe-outbound, and separate-app
+probe-outbound hypotheses are empirically rejected. The configuration audit
+found that both the outbound
 harness leg and inbound agent leg had been originated/routed through the agent
 application even though the harness number belongs to a distinct application.
-The corrected topology originates through the trusted harness connection, uses
-a per-call HTTPS webhook override for that outbound leg, receives the agent leg
-through the existing agent application, requests `both_tracks` on the probe
-socket, and measures:
+Separate-application origination remains the required configuration baseline.
+The remaining provider surface under review makes the probe stream receive-only
+with `both_tracks` so bidirectional injection cannot suppress its outbound
+track. It would deliver the fixture through a one-time authenticated HTTPS WAV
+response from the same harness process, timestamping the first non-silent
+response chunk on the same monotonic clock. It measures:
 
 - neutral channel A: provider `outbound` media from the probe-leg socket;
 - neutral channel B: provider `inbound` media from the agent-leg socket.
@@ -311,7 +316,11 @@ Agent/stimulus roles are still
 proven jointly by greeting activity, silence, fixture correlation, and
 post-stimulus response; no role is inferred from `inbound` or `outbound`. The
 two sockets retain independent ordering domains, with track-local measurement
-continuity. The probe socket performs fixture injection as before.
+continuity. The first receive-only diagnostic deliberately stops with named
+`stimulus_transport_pending` immediately after proving a returned greeting and
+natural stop; it sends no fixture. The one-time HTTPS fixture transport is
+implemented only if that prerequisite direction is empirically present, so an
+absent outbound track cannot broaden the live surface unnecessarily.
 
 The harness connection is required, nonempty, and distinct from the agent
 connection. Immediately before dialing, read-only Telnyx lookups require both
@@ -431,6 +440,15 @@ gate.
   only the bounded channel-B WAV, both legs were hung up, the agent webhook was
   restored, and the tunnel was stopped. A read-only post-run assignment audit
   then exposed the same-application origination mismatch described above.
+- 2026-07-12, authorized iterative attempt 11 (`target_legs=opposite`, revision
+  `c54426b`): **NO-GO — `agent_audio_not_observed`**. Both active number
+  assignments were verified, the call originated through the distinct harness
+  application with a per-call webhook override, and the agent leg arrived
+  through the agent application. The probe still delivered 1,071 inbound and
+  zero outbound frames; the agent delivered 1,113 inbound frames. No channel-A
+  WAV or fixture transmission was possible. Both legs were hung up, exact agent
+  webhook restoration was verified, and the tunnel was stopped. This rejects
+  separate-application bidirectional probe streaming.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -458,6 +476,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized agent-`both_tracks` topology attempt retained.
 - [x] One authorized combined cross-leg/`both_tracks` attempt retained.
 - [x] One authorized same-app probe-outbound attempt retained.
+- [x] One authorized separate-app probe-outbound attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

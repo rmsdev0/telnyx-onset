@@ -9,6 +9,7 @@ import os
 import time
 import wave
 from array import array
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import httpx
@@ -446,6 +447,39 @@ async def test_controller_owns_leg_a_routes_leg_b_and_bridges(tmp_path: Path) ->
     assert cfg.public_webhook_url not in manifest
     assert "memory-leg-a" not in manifest
     assert "memory-leg-b" not in manifest
+
+
+@pytest.mark.asyncio
+async def test_receive_only_probe_omits_all_bidirectional_options(
+    tmp_path: Path,
+) -> None:
+    cfg = replace(config(tmp_path), probe_receive_only=True)
+    fake = FakeCallControl(cfg.settings)
+    controller = ProbeController(cfg, cast("SafeCallControl", fake))
+    await controller.dial()
+    await controller.dispatch(
+        "call.initiated",
+        {
+            "call_control_id": "memory-leg-b",
+            "direction": "incoming",
+            "from": cfg.harness_number,
+            "to": cfg.agent_number,
+        },
+    )
+    await controller.dispatch("call.answered", {"call_control_id": "memory-leg-a"})
+    await controller.dispatch("call.answered", {"call_control_id": "memory-leg-b"})
+    await controller.dispatch("call.bridged", {"call_control_id": "memory-leg-a"})
+    streams = [item for item in fake.actions if item[1] == "streaming_start"]
+    probe_payload = next(
+        payload for ccid, _, payload in streams if ccid == "memory-leg-a"
+    )
+    agent_payload = next(
+        payload for ccid, _, payload in streams if ccid == "memory-leg-b"
+    )
+    assert probe_payload["stream_track"] == "both_tracks"
+    assert probe_payload["stream_codec"] == "L16"
+    assert not any(key.startswith("stream_bidirectional") for key in probe_payload)
+    assert agent_payload["stream_bidirectional_mode"] == "rtp"
 
 
 @pytest.mark.asyncio
@@ -1134,6 +1168,54 @@ def test_probe_route_both_tracks_rejects_queued_fixture_as_response(
         manifest = json.loads((controller.artifacts.path / "manifest.json").read_text())
         assert manifest["gate_outcome"] == "NO-GO"
         assert manifest["failure_category"] == "fixture_match_ambiguous"
+
+
+def test_receive_only_probe_stops_after_proving_returned_greeting(
+    tmp_path: Path,
+) -> None:
+    base = config(tmp_path)
+    fixture, _ = patterned_fixture()
+    cfg = replace(
+        base,
+        fixture=fixture,
+        artifacts_root=tmp_path / "receive-only-route-artifacts",
+        probe_receive_only=True,
+    )
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    active = array("h", [8_000] * 320).tobytes()
+    silence = b"\x00\x00" * 320
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        controller.leg_b = "memory-leg-b"
+        controller.bridge_ready.set()
+        token = _route_token(controller)
+        with client.websocket_connect(
+            f"/ws/probe/{controller.run_id}",
+            headers={"x-telnyx-streaming-auth-token": token},
+        ) as ws:
+            ws.send_text(start_raw("route-call"))
+            state = {
+                "probe_sequence": 2,
+                "agent_sequence": 2,
+                "probe_chunk": 0,
+                "agent_chunk": 0,
+            }
+            for index in range(30):
+                send_cross_leg_pair(
+                    ws,
+                    controller,
+                    active if index < 5 else silence,
+                    silence,
+                    state,
+                )
+                if controller.failure is not None:
+                    break
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_text()
+        assert controller.failure == "stimulus_transport_pending"
+        assert ProbeState.AGENT_NATURAL_STOP_OBSERVED in controller.states
+        assert ProbeState.STIMULUS_STARTED not in controller.states
+        assert not (controller.artifacts.path / "send_frames.jsonl").exists()
 
 
 @pytest.mark.parametrize(

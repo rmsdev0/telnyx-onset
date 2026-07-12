@@ -147,6 +147,7 @@ FAILURE_CATEGORIES = frozenset(
         "agent_audio_not_observed",
         "natural_stop_not_observed",
         "stimulus_send_failed",
+        "stimulus_transport_pending",
         "fixture_match_missing",
         "fixture_match_ambiguous",
         "stimulus_overlap",
@@ -393,6 +394,7 @@ class BenchConfig:
     call_seconds: int = MAX_CALL_SECONDS
     capture_seconds: int = MAX_CAPTURE_SECONDS
     attempts: int = 1
+    probe_receive_only: bool = False
 
     def __post_init__(self) -> None:
         if self.target_legs not in {"self", "opposite"}:
@@ -793,14 +795,21 @@ class ProbeController:
                 f"{self.config.public_wss_base.rstrip('/')}/ws/{route}/{self.run_id}"
             ),
             "stream_track": "both_tracks",
-            "stream_bidirectional_mode": "rtp",
-            "stream_bidirectional_codec": "L16",
-            "stream_bidirectional_sampling_rate": SAMPLE_RATE,
-            "stream_bidirectional_target_legs": self.config.target_legs
-            if role == "probe"
-            else "self",
             "stream_auth_token": token,
         }
+        if role == "probe" and self.config.probe_receive_only:
+            payload["stream_codec"] = "L16"
+        else:
+            payload.update(
+                {
+                    "stream_bidirectional_mode": "rtp",
+                    "stream_bidirectional_codec": "L16",
+                    "stream_bidirectional_sampling_rate": SAMPLE_RATE,
+                    "stream_bidirectional_target_legs": (
+                        self.config.target_legs if role == "probe" else "self"
+                    ),
+                }
+            )
         try:
             await self.call_control.action(ccid, "streaming_start", payload)
         except Exception as exc:
@@ -1777,6 +1786,10 @@ def create_app(
                                         ),
                                     },
                                 )
+                                if config.probe_receive_only:
+                                    raise ProbeProtocolError(
+                                        "stimulus_transport_pending"
+                                    )
                                 stimulus_start_ns = controller.clock.monotonic_ns()
                                 controller.transition(ProbeState.STIMULUS_STARTED)
                                 stimulus_task = asyncio.create_task(
@@ -2433,6 +2446,7 @@ def _live_config(arguments: argparse.Namespace) -> BenchConfig:
         target_legs=target_legs,
         fixture=load_fixture(fixture_value),
         artifacts_root=validate_artifact_root(ARTIFACT_ROOT),
+        probe_receive_only=True,
     )
 
 
