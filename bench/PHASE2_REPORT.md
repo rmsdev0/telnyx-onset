@@ -10,9 +10,10 @@ exposed and corrected a transient dynamic-end handling error. A fifth corrected
 call captured both channels for the hard call duration but never completed
 greeting-track selection. A sixth diagnostic run reached greeting selection and
 fixture transmission, but proved that pre-greeting setup audio had been selected
-before the actual VoiceAgent greeting completed. No fixture match, manual
-waveform review, detector calibration, or empirical GO was produced. Phase 3
-remains blocked.
+before the actual VoiceAgent greeting completed. A seventh causal-gated run then
+proved that neither inbound-only leg stream carries a valid returned greeting.
+No fixture match, manual waveform review, detector calibration, or empirical GO
+was produced. Phase 3 remains blocked.
 
 ## Repository and scope
 
@@ -190,6 +191,13 @@ returned **GO** for the bench-only causal greeting-output gate. It verified that
 candidate analysis, the explicit horizon, Window A, and final summary all begin
 at the first VoiceAgent audio frame while production modules remain unchanged.
 
+An independent review of the seventh call confirmed empirical **NO-GO** and
+returned **GO** for the offline agent-leg `both_tracks` topology. It verified the
+single agent-socket ordering domain, neutral track mapping, inbound-only
+VoiceAgent feed, independent probe ordering, and continued fail-closed role
+proof. Whether Telnyx forks injected output onto agent outbound remains a live
+unknown.
+
 ## Manual review procedure
 
 After a separately authorized live run, inspect only its ignored local run
@@ -236,6 +244,11 @@ This is waveform agreement validation, not a human-perception measurement.
   records the first actual VoiceAgent output frame and anchors greeting analysis,
   Window A, and the full 15-second horizon to that causal event; pre-greeting
   media is excluded.
+- The causal-gated run found channel A quiet in all 752 post-greeting frames
+  (maximum -68.75 dBFS). Channel B had 15 active and 748 quiet frames, but its
+  longest active run was two frames—below the five-frame/100 ms arm. It failed
+  `agent_audio_not_observed`. This establishes that inbound-only streams cannot
+  supply the returned VoiceAgent track under this topology.
 - Stable track separation and track-to-leg orientation remain unproven because
   the fourth and fifth calls ended before fixture transmission and the sixth
   selected setup audio rather than the real greeting.
@@ -248,24 +261,25 @@ This is waveform agreement validation, not a human-perception measurement.
 
 ## Post-NO-GO topology correction prepared offline
 
-No further call has been made after the exhausted three-attempt run. The live
-metadata showed that Telnyx exposed one stable inbound stream on each of the two
-authenticated call-leg WebSockets, while never exposing the requested second
-track on leg A. The repaired harness therefore combines those two existing
-isolated channels on the same process monotonic clock:
+The inbound-only dual-socket hypothesis is now empirically rejected. The next
+offline topology requests Telnyx's documented `both_tracks` mode on the agent
+leg and uses its single authenticated WebSocket as the measurement source:
 
-- channel A: leg A's inbound stream, evaluated as the returned-agent candidate;
-- channel B: leg B's inbound stream, also consumed normally by the unchanged
-  VoiceAgent and evaluated as the stimulus-reference candidate.
+- neutral channel A: provider `outbound` media from the agent socket;
+- neutral channel B: provider `inbound` media from the same socket.
 
-These labels are socket provenance only. Agent/stimulus mapping is still proven
-jointly by the greeting, silence, fixture correlation, and post-stimulus
-response; it is never inferred from `inbound` or leg names. Provider sequence,
-chunk, and timestamp integrity remain independent per WebSocket. Every Window
-A-D boundary is defined once in process monotonic time and mapped separately to
-the first frame at or after that boundary on each channel. Unequal socket
-prefixes are discarded, missing common coverage fails closed, and mapped
-boundary timestamps more than 40 ms apart fail as
+The provider labels are used only to separate frames and to ensure that only
+inbound audio is fed to the unchanged VoiceAgent. Agent/stimulus roles are still
+proven jointly by greeting activity, silence, fixture correlation, and
+post-stimulus response; no role is inferred from `inbound` or `outbound`. The
+agent socket uses one global sequence tracker with track-local chunk/timestamp
+state. The probe socket remains inbound-only, has independent ordering, performs
+fixture injection, and is excluded from acoustic analysis.
+
+Every Window A-D boundary remains defined once in process monotonic time and
+mapped separately to the first frame at or after that boundary on each neutral
+channel. Unequal prefixes are discarded, missing common coverage fails closed,
+and mapped boundary timestamps more than 40 ms apart fail as
 `cross_channel_alignment_failed`.
 
 Host receive time is sampled when each async WebSocket handler processes a
@@ -279,10 +293,9 @@ other channel conservatively advances past its corresponding boundary frame.
 The 100 ms host interval must also contain at least 100 ms of PCM on each
 channel; sparse delivery cannot satisfy the acoustic-duration requirement.
 
-The probe now requests only the track Telnyx empirically exposed on each leg and
-waits for the bridge plus validated starts from both authenticated media sockets
-before starting the normal VoiceAgent greeting. This is an implementation
-correction within the plan's
+The harness waits for the bridge plus validated starts from both authenticated
+media sockets before starting the normal VoiceAgent greeting. This is an
+implementation correction within the plan's
 pre-registered allowance for an isolated returned-agent channel plus a stimulus
 reference, not a change to the metric, detector gate, eligibility rules, or
 comparative conditions.
@@ -338,6 +351,13 @@ gate.
   showed channel A remained quiet and channel B became strongly active. No
   fixture correlation or waveform artifact was produced; both legs were hung
   up. The causal greeting-output gate was then added offline.
+- 2026-07-12, authorized iterative attempt 7 (`target_legs=opposite`, revision
+  `39aa51c`): **NO-GO — `agent_audio_not_observed`**. The causal gate excluded
+  setup media and waited the full greeting horizon. Channel A remained entirely
+  quiet; channel B never exceeded two consecutive active frames. This rejects
+  the inbound-only measurement topology. The agent-leg `both_tracks` hypothesis
+  was prepared offline; whether Telnyx forks WebSocket-injected output back onto
+  that stream's outbound track remains explicitly unproven.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Failed runs produced sanitized metadata only; no mapped
@@ -360,6 +380,7 @@ track WAVs, comparative results, or measurement profile were produced.
 - [x] One separately authorized post-cap dual-socket attempt retained.
 - [x] One separately authorized corrected dual-socket retry retained.
 - [x] One authorized iterative diagnostic fixture attempt retained.
+- [x] One authorized causal-greeting inbound-topology attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

@@ -397,21 +397,33 @@ def validate_authorized_call_id(actual: str, expected: str) -> None:
 class BoundedCapture:
     """In-memory per-track PCM with hard byte and row ceilings."""
 
-    def __init__(self, *, max_bytes_per_track: int, max_event_rows: int) -> None:
+    def __init__(
+        self,
+        *,
+        max_bytes_per_track: int,
+        max_event_rows: int,
+        tracks: tuple[str, ...] = tuple(ALLOWED_TRACKS),
+    ) -> None:
         if max_bytes_per_track <= 0 or max_event_rows <= 0:
             raise ValueError("capture limits must be positive")
+        if (
+            not tracks
+            or len(set(tracks)) != len(tracks)
+            or any(not item for item in tracks)
+        ):
+            raise ValueError("capture tracks must be distinct and nonempty")
         self._maximum = max_bytes_per_track
         self._max_rows = max_event_rows
-        self.tracks: dict[str, bytearray] = {
-            track: bytearray() for track in ALLOWED_TRACKS
-        }
+        self.tracks: dict[str, bytearray] = {track: bytearray() for track in tracks}
         self.frames: list[MediaFrame] = []
         self.ordering = OrderingTracker()
 
     def append(self, frame: MediaFrame) -> None:
         if len(self.frames) >= self._max_rows:
             raise CaptureLimitError("capture_limit_reached")
-        target = self.tracks[frame.track]
+        target = self.tracks.get(frame.track)
+        if target is None:
+            raise ProbeProtocolError("track_missing")
         if len(target) + len(frame.pcm16) > self._maximum:
             raise CaptureLimitError("capture_limit_reached")
         target.extend(frame.pcm16)

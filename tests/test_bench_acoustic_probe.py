@@ -386,8 +386,13 @@ async def test_controller_owns_leg_a_routes_leg_b_and_bridges(tmp_path: Path) ->
     probe_payload = next(
         payload for ccid, _, payload in streams if ccid == "memory-leg-a"
     )
+    agent_payload = next(
+        payload for ccid, _, payload in streams if ccid == "memory-leg-b"
+    )
     assert probe_payload["stream_track"] == "inbound_track"
     assert probe_payload["stream_bidirectional_target_legs"] == "opposite"
+    assert agent_payload["stream_track"] == "both_tracks"
+    assert agent_payload["stream_bidirectional_target_legs"] == "self"
     assert "token=" not in str(probe_payload["stream_url"])
     assert "stream_auth_token" in probe_payload
     bridges = [item for item in fake.actions if item[1] == "bridge"]
@@ -692,16 +697,28 @@ def send_cross_leg_pair(
     controller.mark_greeting_started()
     state["agent_chunk"] += 1
     capture.append(
-        acoustic_probe.AGENT_CHANNEL,
         MediaFrame(
             state["agent_sequence"],
             "agent-stream",
-            "inbound",
+            acoustic_probe.AGENT_CHANNEL,
             state["agent_chunk"],
             (state["agent_chunk"] - 1) * 20,
             reference_pcm,
             time.monotonic_ns(),
         ),
+    )
+    state["agent_sequence"] += 1
+    state["output_chunk"] = state.get("output_chunk", 0) + 1
+    capture.append(
+        MediaFrame(
+            state["agent_sequence"],
+            "agent-stream",
+            acoustic_probe.PROBE_CHANNEL,
+            state["output_chunk"],
+            (state["output_chunk"] - 1) * 20,
+            probe_pcm,
+            time.monotonic_ns(),
+        )
     )
     state["agent_sequence"] += 1
     state["probe_chunk"] += 1
@@ -715,9 +732,9 @@ def send_cross_leg_pair(
         )
     )
     state["probe_sequence"] += 1
-    expected = state["probe_chunk"] * len(probe_pcm)
+    expected = state["probe_chunk"]
     for _ in range(1_000):
-        if len(capture.tracks[acoustic_probe.PROBE_CHANNEL]) >= expected:
+        if controller.probe_media_frames_received >= expected:
             return
         if (
             controller.failure is not None
@@ -734,24 +751,24 @@ def test_probe_route_stalled_auth_times_out_before_capture_allocation(
     cfg = config(tmp_path)
     app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
     allocations = 0
-    original = CrossLegCapture
+    original = BoundedCapture
 
     def counted_capture(
-        channels: tuple[str, str],
         *,
-        max_bytes_per_channel: int,
+        max_bytes_per_track: int,
         max_event_rows: int,
-    ) -> CrossLegCapture:
+        tracks: tuple[str, ...] = ("inbound", "outbound"),
+    ) -> BoundedCapture:
         nonlocal allocations
         allocations += 1
         return original(
-            channels,
-            max_bytes_per_channel=max_bytes_per_channel,
+            tracks=tracks,
+            max_bytes_per_track=max_bytes_per_track,
             max_event_rows=max_event_rows,
         )
 
     monkeypatch.setattr(acoustic_probe, "AUTH_HANDSHAKE_TIMEOUT_SECONDS", 0.01)
-    monkeypatch.setattr(acoustic_probe, "CrossLegCapture", counted_capture)
+    monkeypatch.setattr(acoustic_probe, "BoundedCapture", counted_capture)
     with TestClient(app) as client:
         controller: ProbeController = app.state.controller
         with (
@@ -1184,6 +1201,7 @@ def test_probe_and_agent_routes_capture_concurrently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = config(tmp_path)
+    handled_audio: list[bytes] = []
 
     class FakeMediaStream:
         def __init__(self, ws: object, *, frame_ms: int, lead_frames: int) -> None:
@@ -1208,7 +1226,7 @@ def test_probe_and_agent_routes_capture_concurrently(
             pass
 
         def handle_audio(self, pcm16: bytes) -> None:
-            pass
+            handled_audio.append(pcm16)
 
         def submit_speak_ended(self, generation: int | None) -> None:
             pass
@@ -1242,6 +1260,15 @@ def test_probe_and_agent_routes_capture_concurrently(
             agent_ws.send_text(
                 probe_media_raw(
                     sequence=2,
+                    track="outbound",
+                    chunk=1,
+                    timestamp=0,
+                    pcm16=b"\x03\x00" * 320,
+                )
+            )
+            agent_ws.send_text(
+                probe_media_raw(
+                    sequence=3,
                     track="inbound",
                     chunk=1,
                     timestamp=0,
@@ -1270,8 +1297,9 @@ def test_probe_and_agent_routes_capture_concurrently(
                 b"\x01\x00" * 320
             )
             assert bytes(capture.tracks[acoustic_probe.PROBE_CHANNEL]) == (
-                b"\x02\x00" * 320
+                b"\x03\x00" * 320
             )
+            assert handled_audio == [b"\x01\x00" * 320]
 
 
 def test_probe_route_capture_limit_is_named_and_terminal(

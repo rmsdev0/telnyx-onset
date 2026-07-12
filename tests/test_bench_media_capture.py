@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -263,6 +263,26 @@ def test_capture_limits_and_per_track_separation() -> None:
     assert bytes(capture.tracks["outbound"]) == outbound.pcm16
     with pytest.raises(CaptureLimitError, match="capture_limit_reached"):
         capture.append(inbound)
+
+
+def test_bounded_capture_accepts_neutral_track_labels_with_shared_sequence() -> None:
+    capture = BoundedCapture(
+        tracks=("channel_a", "channel_b"),
+        max_bytes_per_track=10_000,
+        max_event_rows=10,
+    )
+    outbound = decode_probe_message(
+        media_raw(track="outbound", sequence=2, chunk=1, timestamp=20), 1
+    )
+    inbound = decode_probe_message(
+        media_raw(track="inbound", sequence=3, chunk=1, timestamp=20), 2
+    )
+    assert isinstance(outbound, MediaFrame) and isinstance(inbound, MediaFrame)
+    capture.append(replace(outbound, track="channel_a"))
+    capture.append(replace(inbound, track="channel_b"))
+    assert not capture.ordering.unresolved
+    assert bytes(capture.tracks["channel_a"]) == outbound.pcm16
+    assert bytes(capture.tracks["channel_b"]) == inbound.pcm16
 
 
 def test_artifact_paths_are_internal_and_private(
