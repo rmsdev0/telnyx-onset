@@ -762,6 +762,7 @@ async def test_safe_dial_verifies_assignments_and_uses_harness_connection(
     assert payload == {
         "connection_id": cfg.harness_connection_id,
         "from": cfg.harness_number,
+        "preferred_codecs": "PCMU",
         "to": cfg.agent_number,
         "webhook_url": cfg.public_webhook_url,
         "webhook_url_method": "POST",

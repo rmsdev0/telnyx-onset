@@ -475,6 +475,7 @@ class SafeCallControl:
                 "connection_id": connection_id,
                 "to": to,
                 "from": from_,
+                "preferred_codecs": "PCMU",
                 "webhook_url": webhook_url,
                 "webhook_url_method": "POST",
             },

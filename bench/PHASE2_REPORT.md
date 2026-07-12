@@ -313,8 +313,9 @@ response chunk on the same monotonic clock. It measures:
 
 The receive-only provider surface does not honor L16 transcoding: the observed
 start format was G.722/8 kHz/mono while the agent remained L16/16 kHz/mono. The
-corrected request uses Telnyx's supported PCMU transcode target and requires an
-exact PCMU/8 kHz/mono start. A local G.711 decoder maps each mu-law byte to its
+corrected request uses Telnyx's supported PCMU transcode target, forces PCMU in
+the harness dial's preferred-codec list, and requires an exact PCMU/8 kHz/mono
+start. A local G.711 decoder maps each mu-law byte to its
 standard signed PCM value and duplicates each 8 kHz sample once to form a 16 kHz
 analysis timeline. This zero-order hold preserves 20 ms frame duration and
 introduces no interpolated energy; the probe's acoustic boundary resolution
@@ -479,6 +480,12 @@ gate.
   were hung up, exact webhook restoration was verified, and the tunnel was
   stopped. PCMU/8 kHz normalization was then implemented offline; this run is
   not reinterpreted under the new decoder.
+- 2026-07-12, authorized iterative attempt 14 (`target_legs=opposite`, revision
+  `a2452e0`): **NO-GO — `media_format_mismatch`**. Requesting PCMU on the
+  receive-only stream alone still yielded G.722/8 kHz/mono because the call had
+  negotiated G.722. The mismatch failed before agent startup or media. Both
+  legs were hung up, exact webhook restoration was verified, and the tunnel was
+  stopped. The harness dial now explicitly prefers PCMU before streaming starts.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -509,6 +516,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized separate-app probe-outbound attempt retained.
 - [x] One authorized receive-only format attempt retained.
 - [x] One authorized receive-only sanitized format observation retained.
+- [x] One authorized receive-only PCMU-request attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.
