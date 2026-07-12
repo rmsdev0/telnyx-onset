@@ -449,6 +449,14 @@ gate.
   WAV or fixture transmission was possible. Both legs were hung up, exact agent
   webhook restoration was verified, and the tunnel was stopped. This rejects
   separate-application bidirectional probe streaming.
+- 2026-07-12, authorized iterative attempt 12 (`target_legs=opposite`, revision
+  `a0e2ada`): **NO-GO — `media_format_mismatch`**. The receive-only probe
+  stream connected, but its start metadata failed the exact L16/16 kHz/mono
+  gate before the agent started or any media was processed. No fixture was
+  transmitted; both legs were hung up, exact webhook restoration was verified,
+  and the tunnel was stopped. A sanitized format-observation event is added
+  offline so the next bounded run can distinguish provider codec/rate/channel
+  behavior without weakening the gate.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -477,6 +485,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized combined cross-leg/`both_tracks` attempt retained.
 - [x] One authorized same-app probe-outbound attempt retained.
 - [x] One authorized separate-app probe-outbound attempt retained.
+- [x] One authorized receive-only format attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

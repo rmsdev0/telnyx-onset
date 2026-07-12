@@ -1612,6 +1612,17 @@ def create_app(
                         validate_authorized_call_id(
                             frame.call_control_id, authorization.call_control_id
                         )
+                        controller.artifacts.append_jsonl(
+                            "events.jsonl",
+                            {
+                                "event": "media_format_observed",
+                                "role": "probe",
+                                "media_format": asdict(frame.media_format),
+                                "host_monotonic_ns": (
+                                    frame.host_receive_monotonic_ns
+                                ),
+                            },
+                        )
                         validate_media_format(
                             frame.media_format,
                             encoding="L16",
@@ -2316,6 +2327,15 @@ def create_app(
                     agent_integrity.observe_non_media(event)
                     validate_authorized_call_id(
                         event.call_control_id, authorization.call_control_id
+                    )
+                    controller.artifacts.append_jsonl(
+                        "events.jsonl",
+                        {
+                            "event": "media_format_observed",
+                            "role": "agent",
+                            "media_format": asdict(event.media_format),
+                            "host_monotonic_ns": event.host_receive_monotonic_ns,
+                        },
                     )
                     validate_media_format(
                         event.media_format,

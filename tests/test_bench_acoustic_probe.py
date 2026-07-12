@@ -1000,6 +1000,12 @@ def test_probe_route_rejects_start_mismatch(
             ws.send_text(start_raw(call_id, encoding=encoding))
             ws.receive_text()
         assert controller.failure == failure
+        events = (controller.artifacts.path / "events.jsonl").read_text()
+        if failure == "media_format_mismatch":
+            assert '"event":"media_format_observed"' in events
+            assert '"encoding":"PCMU"' in events
+            assert '"role":"probe"' in events
+        assert call_id not in events
 
 
 def test_probe_route_requires_bridge_and_hangs_up_both_legs(
