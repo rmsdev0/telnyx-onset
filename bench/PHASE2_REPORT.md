@@ -600,6 +600,35 @@ threshold, silence requirement, time bound, or promotion gate was changed.
   retries are halted to avoid outcome fishing; the next step requires a Telnyx
   media/topology correction or a separately reviewed benchmark redesign.
 
+- 2026-07-12, authorized iterative attempt 22 (`target_legs=opposite`, revision
+  `f51e1ed`): **NO-GO — `track_ambiguous`**. The agent-leg bidirectional target
+  used the documented `opposite` value for the first time. Both exact media
+  formats passed, the greeting injected once, and the attempt-21 replay loop
+  did not recur: loud audio spanned a single interval matching the injected
+  frame count and then stopped naturally on both measured channels. Channel A
+  (probe-leg provider outbound) carried strong returned agent audio for the
+  first time in any attempt, confirming that `opposite` delivers injected
+  audio to the bridged harness leg. However, channel B (agent-leg provider
+  inbound) carried a near-simultaneous copy of the same greeting — first and
+  last active frames within about one millisecond of channel A's, with
+  matching level distributions and no clipping — so joint selection could not
+  attribute the greeting to exactly one track and correctly failed closed
+  before any fixture arming. The sub-millisecond simultaneity rules out an
+  acoustic echo path and indicates the copies diverge at a provider mixing
+  point: websocket-injected audio appears at its agent-leg entry (provider
+  inbound) at the same instant it is delivered to the opposite leg. Agent
+  provider-outbound again delivered zero frames, consistent with nothing yet
+  played toward the agent leg. Both legs were hung up, exact webhook
+  restoration was verified, and the tunnel was stopped. This replaces the
+  attempt-21 replay blocker with a structural finding: while the agent injects
+  on the same leg that supplies channel B, the greeting window cannot present
+  exactly one active track under the current channel designation. Candidate
+  correction under review: designate agent-leg provider outbound (the
+  provider's delivery surface toward the agent) as the stimulus-reference
+  channel and demote agent provider-inbound to diagnostics, contingent on
+  evidence that the outbound track supplies frame coverage outside active
+  playback.
+
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
 diagnostic WAVs under the documented exception. No mapped promotion track WAVs,
@@ -637,6 +666,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized full-transport attempt retained.
 - [x] One authorized unchanged full-transport retry retained.
 - [x] One authorized whole-buffer full-transport retry retained.
+- [x] One authorized opposite-target full-transport attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.
