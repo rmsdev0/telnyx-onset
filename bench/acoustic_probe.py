@@ -448,6 +448,7 @@ class ProbeController:
         self.started_ns = self.clock.monotonic_ns()
         self.last_transition_ns = self.started_ns
         self.teardown_result = "not_started"
+        self._hangup_task: asyncio.Task[None] | None = None
         self._manifest_outcome = "CONDITIONAL GO"
         self._manifest_extra: dict[str, object] = {}
         self._write_manifest("CONDITIONAL GO", attempt_number=1)
@@ -560,15 +561,13 @@ class ProbeController:
 
         if event_type == "call.answered" and ccid in {self.leg_a, self.leg_b}:
             self.answered.add(ccid)
-            if ccid == self.leg_a and "probe" not in self.streams_started:
-                await self._start_stream(ccid, role="probe")
-                self.streams_started.add("probe")
-            elif ccid == self.leg_b and "agent" not in self.streams_started:
-                await self._start_stream(ccid, role="agent")
+            if ccid == self.leg_b and "agent" not in self.streams_started:
                 self.streams_started.add("agent")
+                await self._start_stream(ccid, role="agent")
             if self.leg_a and self.leg_b and {self.leg_a, self.leg_b} <= self.answered:
                 self.transition(ProbeState.LEGS_ANSWERED)
                 if not self.bridge_sent:
+                    self.bridge_sent = True
                     try:
                         await self.call_control.action(
                             self.leg_a,
@@ -581,7 +580,6 @@ class ProbeController:
                     except Exception as exc:
                         self.fail("bridge_failed")
                         raise GateFailureError("bridge_failed") from exc
-                    self.bridge_sent = True
             return
 
         if event_type == "call.bridged" and ccid in {self.leg_a, self.leg_b}:
@@ -595,6 +593,9 @@ class ProbeController:
                         "host_monotonic_ns": self.clock.monotonic_ns(),
                     },
                 )
+            if self.leg_a and "probe" not in self.streams_started:
+                self.streams_started.add("probe")
+                await self._start_stream(self.leg_a, role="probe")
         elif (
             event_type == "call.hangup"
             and ccid in {self.leg_a, self.leg_b}
@@ -628,6 +629,11 @@ class ProbeController:
         self.transition(ProbeState.STREAM_AUTHORIZED)
 
     async def hangup_both(self) -> None:
+        if self._hangup_task is None:
+            self._hangup_task = asyncio.create_task(self._hangup_both_once())
+        await asyncio.shield(self._hangup_task)
+
+    async def _hangup_both_once(self) -> None:
         async def hangup(ccid: str) -> bool:
             try:
                 await self.call_control.action(ccid, "hangup")

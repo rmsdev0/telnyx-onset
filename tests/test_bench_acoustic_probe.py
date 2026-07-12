@@ -255,6 +255,10 @@ async def test_controller_owns_leg_a_routes_leg_b_and_bridges(tmp_path: Path) ->
     assert ProbeState.LEG_B_IDENTIFIED in controller.states
     assert ProbeState.LEGS_ANSWERED in controller.states
     streams = [item for item in fake.actions if item[1] == "streaming_start"]
+    assert len(streams) == 1
+    assert streams[0][0] == "memory-leg-b"
+    await controller.dispatch("call.bridged", {"call_control_id": "memory-leg-a"})
+    streams = [item for item in fake.actions if item[1] == "streaming_start"]
     assert len(streams) == 2
     probe_payload = next(
         payload for ccid, _, payload in streams if ccid == "memory-leg-a"
@@ -273,6 +277,89 @@ async def test_controller_owns_leg_a_routes_leg_b_and_bridges(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_concurrent_bridge_webhooks_start_probe_stream_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(tmp_path)
+    fake = FakeCallControl(cfg.settings)
+    controller = ProbeController(cfg, cast("SafeCallControl", fake))
+    controller.leg_a = "memory-leg-a"
+    controller.leg_b = "memory-leg-b"
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    starts = 0
+
+    async def delayed_start(ccid: str, *, role: Literal["probe", "agent"]) -> None:
+        nonlocal starts
+        assert ccid == "memory-leg-a" and role == "probe"
+        starts += 1
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(controller, "_start_stream", delayed_start)
+    first = asyncio.create_task(
+        controller.dispatch("call.bridged", {"call_control_id": "memory-leg-a"})
+    )
+    await entered.wait()
+    second = asyncio.create_task(
+        controller.dispatch("call.bridged", {"call_control_id": "memory-leg-b"})
+    )
+    await asyncio.sleep(0)
+    assert starts == 1
+    release.set()
+    await asyncio.gather(first, second)
+    assert controller.streams_started == {"probe"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_answer_webhooks_send_bridge_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(tmp_path)
+    fake = FakeCallControl(cfg.settings)
+    controller = ProbeController(cfg, cast("SafeCallControl", fake))
+    controller.leg_a = "memory-leg-a"
+    controller.leg_b = "memory-leg-b"
+    agent_started = asyncio.Event()
+    release_agent = asyncio.Event()
+    bridge_started = asyncio.Event()
+    release_bridge = asyncio.Event()
+    bridges = 0
+
+    async def delayed_action(
+        call_control_id: str,
+        action: str,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        nonlocal bridges
+        if action == "streaming_start":
+            assert call_control_id == "memory-leg-b"
+            agent_started.set()
+            await release_agent.wait()
+        elif action == "bridge":
+            assert call_control_id == "memory-leg-a"
+            bridges += 1
+            bridge_started.set()
+            await release_bridge.wait()
+
+    monkeypatch.setattr(fake, "action", delayed_action)
+    leg_b = asyncio.create_task(
+        controller.dispatch("call.answered", {"call_control_id": "memory-leg-b"})
+    )
+    await agent_started.wait()
+    leg_a = asyncio.create_task(
+        controller.dispatch("call.answered", {"call_control_id": "memory-leg-a"})
+    )
+    await bridge_started.wait()
+    release_agent.set()
+    await asyncio.sleep(0)
+    assert bridges == 1
+    release_bridge.set()
+    await asyncio.gather(leg_a, leg_b)
+    assert controller.bridge_sent
+
+
+@pytest.mark.asyncio
 async def test_controller_teardown_attempts_both_legs(tmp_path: Path) -> None:
     cfg = config(tmp_path)
     fake = FakeCallControl(cfg.settings)
@@ -284,6 +371,42 @@ async def test_controller_teardown_attempts_both_legs(tmp_path: Path) -> None:
         ("memory-leg-a", "hangup"),
         ("memory-leg-b", "hangup"),
     }
+
+
+@pytest.mark.asyncio
+async def test_controller_teardown_is_shared_concurrent_and_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(tmp_path)
+    fake = FakeCallControl(cfg.settings)
+    controller = ProbeController(cfg, cast("SafeCallControl", fake))
+    controller.leg_a = "memory-leg-a"
+    controller.leg_b = "memory-leg-b"
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def delayed_action(
+        call_control_id: str,
+        action: str,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        assert action == "hangup"
+        calls.append(call_control_id)
+        if len(calls) == 2:
+            both_started.set()
+        await release.wait()
+
+    monkeypatch.setattr(fake, "action", delayed_action)
+    first = asyncio.create_task(controller.hangup_both())
+    second = asyncio.create_task(controller.hangup_both())
+    await both_started.wait()
+    assert sorted(calls) == ["memory-leg-a", "memory-leg-b"]
+    release.set()
+    await asyncio.gather(first, second)
+    await controller.hangup_both()
+    assert sorted(calls) == ["memory-leg-a", "memory-leg-b"]
+    assert controller.teardown_result == "both_legs_hung_up"
 
 
 @pytest.mark.asyncio

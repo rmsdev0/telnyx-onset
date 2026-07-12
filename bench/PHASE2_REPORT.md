@@ -179,6 +179,15 @@ This is waveform agreement validation, not a human-perception measurement.
 - Whether the fixture produces a distinguishable later agent response.
 - Which finite detector candidate, if any, passes all calibration labels.
 
+## Live attempt log
+
+- 2026-07-11, attempt 1: **NO-GO — `stream_start_failed`**. The call reached
+  both identified legs, then Telnyx rejected the leg-A probe stream before any
+  media capture or track mapping. Both legs were hung up. The controller had
+  requested `target_legs=opposite` before receiving `call.bridged`; the repaired
+  workflow now starts that probe stream only after the bridge exists. No audio,
+  comparative result, or measurement profile was produced by this attempt.
+
 ## Gate checklist
 
 - [x] Bench-only application; production behavior unchanged.
