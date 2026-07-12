@@ -488,6 +488,7 @@ class ProbeController:
         self.agent_socket_active = False
         self.capture: CrossLegCapture | None = None
         self.agent_integrity: BoundedCapture | None = None
+        self.probe_integrity: BoundedCapture | None = None
         self.failure_waveforms_written = False
         self.probe_media_frames_received = 0
         self.states: list[ProbeState] = []
@@ -740,7 +741,7 @@ class ProbeController:
             "stream_url": (
                 f"{self.config.public_wss_base.rstrip('/')}/ws/{route}/{self.run_id}"
             ),
-            "stream_track": "both_tracks" if role == "agent" else "inbound_track",
+            "stream_track": "both_tracks",
             "stream_bidirectional_mode": "rtp",
             "stream_bidirectional_codec": "L16",
             "stream_bidirectional_sampling_rate": SAMPLE_RATE,
@@ -1512,6 +1513,7 @@ def create_app(
         natural_confirmation_ns: int | None = None
         message_rows = 0
         probe_media_frames = 0
+        probe_measurement_frames = 0
         first_tracks_seen: set[str] = set()
         if controller.probe_socket_active:
             await ws.close(code=1008)
@@ -1526,6 +1528,7 @@ def create_app(
                 max_bytes_per_track=MAX_CAPTURE_BYTES_PER_TRACK,
                 max_event_rows=MAX_EVENT_ROWS,
             )
+            controller.probe_integrity = probe_integrity
             controller.transition(ProbeState.STREAM_CONNECTED)
             if connected is not None:
                 controller.artifacts.append_jsonl(
@@ -1575,23 +1578,31 @@ def create_app(
                         continue
                     if isinstance(frame, MediaFrame):
                         probe_integrity.append(frame)
-                        capture.append(
-                            PROBE_CHANNEL,
-                            replace(frame, sequence_number=frame.chunk),
-                        )
                         probe_media_frames += 1
                         controller.probe_media_frames_received = probe_media_frames
+                        measurement_channel = (
+                            PROBE_CHANNEL
+                            if frame.track == "outbound"
+                            else "probe_inbound_unmeasured"
+                        )
+                        if frame.track == "outbound":
+                            capture.append(
+                                PROBE_CHANNEL,
+                                replace(frame, sequence_number=frame.chunk),
+                            )
+                            probe_measurement_frames += 1
                         controller.artifacts.append_jsonl(
                             "frame_metadata.jsonl",
-                            _frame_metadata(frame, channel="probe_socket"),
+                            _frame_metadata(frame, channel=measurement_channel),
                         )
-                        if "probe_socket" not in first_tracks_seen:
-                            first_tracks_seen.add("probe_socket")
+                        diagnostic_track = f"probe_{frame.track}"
+                        if diagnostic_track not in first_tracks_seen:
+                            first_tracks_seen.add(diagnostic_track)
                             controller.artifacts.append_jsonl(
                                 "events.jsonl",
                                 {
                                     "event": "first_frame_received_by_track",
-                                    "track": "probe_socket",
+                                    "track": diagnostic_track,
                                     "host_monotonic_ns": (
                                         frame.host_receive_monotonic_ns
                                     ),
@@ -1601,7 +1612,9 @@ def create_app(
                             agent_track is None
                             and controller.measurement_ready.is_set()
                             and controller.greeting_started_ns is not None
-                            and probe_media_frames % GREETING_ANALYSIS_INTERVAL_FRAMES
+                            and probe_measurement_frames > 0
+                            and probe_measurement_frames
+                            % GREETING_ANALYSIS_INTERVAL_FRAMES
                             == 0
                         ):
                             if controller.greeting_started_ns is None:

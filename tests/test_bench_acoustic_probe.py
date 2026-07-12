@@ -425,7 +425,7 @@ async def test_controller_owns_leg_a_routes_leg_b_and_bridges(tmp_path: Path) ->
     agent_payload = next(
         payload for ccid, _, payload in streams if ccid == "memory-leg-b"
     )
-    assert probe_payload["stream_track"] == "inbound_track"
+    assert probe_payload["stream_track"] == "both_tracks"
     assert probe_payload["stream_bidirectional_target_legs"] == "opposite"
     assert agent_payload["stream_track"] == "both_tracks"
     assert agent_payload["stream_bidirectional_target_legs"] == "self"
@@ -755,7 +755,7 @@ def send_cross_leg_pair(
     ws.send_text(
         probe_media_raw(
             sequence=state["probe_sequence"],
-            track="inbound",
+            track="outbound",
             chunk=state["probe_chunk"],
             timestamp=(state["probe_chunk"] - 1) * 20,
             pcm16=probe_pcm,
@@ -1338,6 +1338,15 @@ def test_probe_and_agent_routes_capture_concurrently(
                     track="inbound",
                     chunk=1,
                     timestamp=0,
+                    pcm16=b"\x06\x00" * 320,
+                )
+            )
+            probe_ws.send_text(
+                probe_media_raw(
+                    sequence=3,
+                    track="outbound",
+                    chunk=1,
+                    timestamp=0,
                     pcm16=b"\x02\x00" * 320,
                 )
             )
@@ -1368,7 +1377,122 @@ def test_probe_and_agent_routes_capture_concurrently(
                 agent_ws.receive_text()
             assert controller.agent_integrity is not None
             assert not controller.agent_integrity.ordering.unresolved
+            assert controller.probe_integrity is not None
+            assert not controller.probe_integrity.ordering.unresolved
             assert not capture.ordering.unresolved
+
+
+def test_probe_both_tracks_measures_only_outbound_with_global_integrity(
+    tmp_path: Path,
+) -> None:
+    cfg = config(tmp_path)
+    fake = FakeCallControl(cfg.settings)
+    app = create_app(cfg, cast("SafeCallControl", fake))
+    inbound = b"\x06\x00" * 320
+    outbound_one = b"\x02\x00" * 320
+    outbound_two = b"\x03\x00" * 320
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        controller.leg_b = "memory-leg-b"
+        controller.bridge_ready.set()
+        controller.agent_integrity = BoundedCapture(
+            max_bytes_per_track=1_000_000, max_event_rows=100
+        )
+        token = _route_token(controller, "probe-call", "probe")
+        with (
+            pytest.raises(WebSocketDisconnect),
+            client.websocket_connect(
+                f"/ws/probe/{controller.run_id}",
+                headers={"x-telnyx-streaming-auth-token": token},
+            ) as ws,
+        ):
+            ws.send_text(start_raw("probe-call"))
+            controller.mark_media_ready(
+                acoustic_probe.AGENT_CHANNEL, time.monotonic_ns()
+            )
+            for sequence, track, chunk, payload in (
+                (2, "inbound", 1, inbound),
+                (3, "outbound", 1, outbound_one),
+                (4, "inbound", 2, inbound),
+                (5, "outbound", 2, outbound_two),
+            ):
+                ws.send_text(
+                    probe_media_raw(
+                        sequence=sequence,
+                        track=track,
+                        chunk=chunk,
+                        timestamp=(chunk - 1) * 20,
+                        pcm16=payload,
+                    )
+                )
+            ws.send_text(
+                json.dumps(
+                    {
+                        "event": "mark",
+                        "sequence_number": "6",
+                        "mark": {"name": "diagnostic"},
+                    }
+                )
+            )
+            ws.send_text(json.dumps({"event": "stop", "sequence_number": "7"}))
+            ws.receive_text()
+        assert controller.failure == "agent_audio_not_observed"
+        assert controller.probe_integrity is not None
+        assert not controller.probe_integrity.ordering.unresolved
+        assert controller.capture is not None
+        assert bytes(controller.capture.tracks[acoustic_probe.PROBE_CHANNEL]) == (
+            outbound_one + outbound_two
+        )
+        assert inbound not in bytes(
+            controller.capture.tracks[acoustic_probe.PROBE_CHANNEL]
+        )
+        assert not controller.capture.ordering.unresolved
+        assert not (controller.artifacts.path / "send_frames.jsonl").exists()
+
+
+def test_energetic_probe_inbound_alone_cannot_select_greeting(
+    tmp_path: Path,
+) -> None:
+    cfg = config(tmp_path)
+    fake = FakeCallControl(cfg.settings)
+    app = create_app(cfg, cast("SafeCallControl", fake))
+    active = array("h", [8_000] * 320).tobytes()
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        controller.leg_b = "memory-leg-b"
+        controller.bridge_ready.set()
+        controller.agent_integrity = BoundedCapture(
+            max_bytes_per_track=1_000_000, max_event_rows=100
+        )
+        token = _route_token(controller, "probe-call", "probe")
+        with (
+            pytest.raises(WebSocketDisconnect),
+            client.websocket_connect(
+                f"/ws/probe/{controller.run_id}",
+                headers={"x-telnyx-streaming-auth-token": token},
+            ) as ws,
+        ):
+            ws.send_text(start_raw("probe-call"))
+            controller.mark_media_ready(
+                acoustic_probe.AGENT_CHANNEL, time.monotonic_ns()
+            )
+            controller.mark_greeting_started()
+            for index in range(10):
+                ws.send_text(
+                    probe_media_raw(
+                        sequence=index + 2,
+                        track="inbound",
+                        chunk=index + 1,
+                        timestamp=index * 20,
+                        pcm16=active,
+                    )
+                )
+            ws.send_text(json.dumps({"event": "stop", "sequence_number": "12"}))
+            ws.receive_text()
+        assert controller.failure == "agent_audio_not_observed"
+        assert controller.capture is not None
+        assert not controller.capture.tracks[acoustic_probe.PROBE_CHANNEL]
+        assert not (controller.artifacts.path / "send_frames.jsonl").exists()
 
 
 def test_probe_route_capture_limit_is_named_and_terminal(
@@ -1392,7 +1516,7 @@ def test_probe_route_capture_limit_is_named_and_terminal(
             ws.send_text(
                 probe_media_raw(
                     sequence=2,
-                    track="inbound",
+                    track="outbound",
                     chunk=1,
                     timestamp=0,
                     pcm16=b"\x00\x00",
