@@ -507,6 +507,15 @@ gate.
   exact webhook restoration was verified, and the tunnel was stopped. The
   common-start calculation was corrected offline without changing the 40 ms
   cross-channel skew limit applied after prefix discard.
+- 2026-07-12, authorized iterative attempt 17 (`target_legs=opposite`, revision
+  `0f2730c`): **NO-GO — `media_format_mismatch`**. PCMU and common-start setup
+  succeeded, but a 156-byte frame on diagnostic-only probe inbound triggered the
+  framing gate. All 124 measured probe-outbound frames were the declared 160
+  bytes; channel A remained quiet, agent inbound was active, and sanitized probe
+  inbound metadata was active. No fixture was sent. Both legs were hung up,
+  exact webhook restoration was verified, and the tunnel was stopped. The exact
+  160-byte gate is now scoped to measured outbound; variable diagnostic inbound
+  remains integrity/metadata-only and cannot enter acoustic analysis.
 
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
@@ -540,6 +549,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized receive-only PCMU-request attempt retained.
 - [x] One authorized PCMU-negotiated framing attempt retained.
 - [x] One authorized receive-only common-start attempt retained.
+- [x] One authorized diagnostic-inbound framing attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.

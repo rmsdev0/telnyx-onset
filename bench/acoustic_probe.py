@@ -1710,7 +1710,11 @@ def create_app(
                             raise ProbeProtocolError("bridge_failed") from exc
                         continue
                     if isinstance(frame, MediaFrame):
-                        if config.probe_receive_only and len(frame.pcm16) != 160:
+                        if (
+                            config.probe_receive_only
+                            and frame.track == "outbound"
+                            and len(frame.pcm16) != 160
+                        ):
                             controller.artifacts.append_jsonl(
                                 "events.jsonl",
                                 {

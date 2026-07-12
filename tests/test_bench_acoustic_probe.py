@@ -1286,6 +1286,49 @@ def test_receive_only_probe_records_sanitized_source_size_mismatch(
         assert "route-call" not in events
 
 
+def test_receive_only_probe_allows_variable_unmeasured_inbound_frame(
+    tmp_path: Path,
+) -> None:
+    cfg = replace(config(tmp_path), probe_receive_only=True)
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        controller.bridge_ready.set()
+        controller.agent_integrity = BoundedCapture(
+            max_bytes_per_track=1_000_000, max_event_rows=100
+        )
+        token = _route_token(controller)
+        with (
+            pytest.raises(WebSocketDisconnect),
+            client.websocket_connect(
+                f"/ws/probe/{controller.run_id}",
+                headers={"x-telnyx-streaming-auth-token": token},
+            ) as ws,
+        ):
+            ws.send_text(start_raw("route-call", encoding="PCMU", sample_rate=8_000))
+            ws.send_text(
+                probe_media_raw(
+                    sequence=2,
+                    track="inbound",
+                    chunk=1,
+                    timestamp=0,
+                    pcm16=b"\xff" * 156,
+                )
+            )
+            ws.send_text(json.dumps({"event": "stop", "sequence_number": "3"}))
+            ws.receive_text()
+        assert controller.failure == "agent_audio_not_observed"
+        rows = [
+            json.loads(line)
+            for line in (controller.artifacts.path / "frame_metadata.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert rows[0]["track"] == "probe_inbound_unmeasured"
+        assert rows[0]["source_payload_bytes"] == 156
+        assert rows[0]["payload_bytes"] == 624
+
+
 @pytest.mark.parametrize(
     "mode", ["success", "overlap", "mixed_response", "lagging_mirror"]
 )
