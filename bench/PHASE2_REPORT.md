@@ -69,8 +69,8 @@ becoming a response.
 
 Named NO-GO outcomes include `fixture_match_missing`,
 `fixture_match_ambiguous`, `stimulus_overlap`,
-`stimulus_boundary_ambiguous`, `track_ambiguous`, and
-`post_stimulus_response_not_observed`.
+`stimulus_boundary_ambiguous`, `track_ambiguous`,
+`cross_channel_alignment_failed`, and `post_stimulus_response_not_observed`.
 
 For every track and A–D window, derived evidence reports active-frame count,
 frame count, RMS dBFS, noise-floor estimate, peak absolute level, clipping
@@ -78,10 +78,11 @@ count, and global/track-local gap, regression, and duplicate counts.
 
 ## Readiness and authentication
 
-The controller owns a bridge-ready event. A probe socket may authenticate and
-validate its start and media format, but Window A capture and stimulus emission
-wait for `call.bridged`. The wait uses the existing state timeout. Failure is
-`bridge_failed`, followed by bounded teardown of both identified legs.
+The controller owns bridge-ready and dual-media-ready events. Each socket may
+authenticate and validate its own start and media format, but Window A analysis
+and normal VoiceAgent startup require both validated starts, and stimulus
+emission also waits for `call.bridged`. The waits use the existing state timeout.
+Failure is named and followed by bounded teardown of both identified legs.
 
 Only one probe socket can be active. Header and connected-frame authentication
 are preserved. When the header is absent, connected-frame receipt and token
@@ -134,10 +135,11 @@ independent review is required before any later profile freeze.
 
 ## Offline validation status
 
-The remediation test suite includes adversarial delayed-fixture and one-frame
-track-skew cases. Similar waveforms on both tracks are ambiguous, not
-first-completer wins. The full exact command results are recorded in the task
-handoff that accompanies this report revision.
+The remediation test suite includes adversarial delayed-fixture, unequal-prefix,
+delayed/missing-channel, excessive cross-handler skew, simultaneous-route, and
+one-frame response-skew cases. Similar waveforms on both tracks are ambiguous,
+not first-completer wins. The full exact command results are recorded in the
+task handoff that accompanies this report revision.
 
 Minimal type-only corrections were made in `tests/test_media.py` and
 `tests/test_tts.py`: collection variance was expressed with iterable/mapping
@@ -190,6 +192,56 @@ This is waveform agreement validation, not a human-perception measurement.
 - Natural-stop and forced-stop detector agreement with waveform inspection.
 - Whether the fixture produces a distinguishable later agent response.
 - Which finite detector candidate, if any, passes all calibration labels.
+
+## Post-NO-GO topology correction prepared offline
+
+No further call has been made after the exhausted three-attempt run. The live
+metadata showed that Telnyx exposed one stable inbound stream on each of the two
+authenticated call-leg WebSockets, while never exposing the requested second
+track on leg A. The repaired harness therefore combines those two existing
+isolated channels on the same process monotonic clock:
+
+- channel A: leg A's inbound stream, evaluated as the returned-agent candidate;
+- channel B: leg B's inbound stream, also consumed normally by the unchanged
+  VoiceAgent and evaluated as the stimulus-reference candidate.
+
+These labels are socket provenance only. Agent/stimulus mapping is still proven
+jointly by the greeting, silence, fixture correlation, and post-stimulus
+response; it is never inferred from `inbound` or leg names. Provider sequence,
+chunk, and timestamp integrity remain independent per WebSocket. Every Window
+A-D boundary is defined once in process monotonic time and mapped separately to
+the first frame at or after that boundary on each channel. Unequal socket
+prefixes are discarded, missing common coverage fails closed, and mapped
+boundary timestamps more than 40 ms apart fail as
+`cross_channel_alignment_failed`.
+
+Host receive time is sampled when each async WebSocket handler processes a
+message, not at kernel/network arrival, so it is not sample-accurate provider
+time. The 40 ms bound explicitly limits that scheduling uncertainty; a run
+outside it is invalid rather than silently comparing different acoustic
+intervals. A two-frame post-confirmation guard also prevents a late mirrored
+frame from being omitted from the joint response check. The fixture endpoint is
+exclusive: the matched channel starts silence at the exact end byte, while the
+other channel conservatively advances past its corresponding boundary frame.
+The 100 ms host interval must also contain at least 100 ms of PCM on each
+channel; sparse delivery cannot satisfy the acoustic-duration requirement.
+
+The probe now requests only the track Telnyx empirically exposed on each leg and
+waits for the bridge plus validated starts from both authenticated media sockets
+before starting the normal VoiceAgent greeting. This is an implementation
+correction within the plan's
+pre-registered allowance for an isolated returned-agent channel plus a stimulus
+reference, not a change to the metric, detector gate, eligibility rules, or
+comparative conditions.
+
+An independent final re-review on 2026-07-11 returned **GO for the offline
+dual-socket topology correction**. It cleared the exclusive fixture endpoint,
+absolute and cross-channel timing bounds, minimum acoustic silence duration,
+simultaneous routes, ordering, teardown, privacy, and production isolation.
+
+Any new bounded live run still requires a fresh explicit authorization. The
+existing empirical verdict remains **NO-GO** until new evidence clears every
+gate.
 
 ## Live attempt log
 

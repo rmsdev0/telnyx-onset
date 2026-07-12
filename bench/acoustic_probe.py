@@ -47,6 +47,8 @@ from bench.media_capture import (
     ArtifactDirectory,
     BoundedCapture,
     ConnectedFrame,
+    CrossLegCapture,
+    DtmfFrame,
     ErrorFrame,
     MarkFrame,
     MediaFormat,
@@ -64,7 +66,7 @@ from bench.media_capture import (
     validate_media_format,
 )
 from onset.agent import VoiceAgent
-from onset.media import Connected, Dtmf, Mark, Media, MediaStream, Start, Stop, decode
+from onset.media import MediaStream
 from onset.prompts import RESTAURANT_CONFIG
 from onset.settings import Settings
 from onset.telnyx import Call, verify_webhook
@@ -89,6 +91,7 @@ SAMPLE_WIDTH = 2
 PACING_TOLERANCE_NS = 10_000_000
 AUTH_HANDSHAKE_TIMEOUT_SECONDS = 2.0
 SEPARATING_SILENCE_MS = 100
+POST_CONFIRMATION_GUARD_MS = 2 * FRAME_MS
 FIXTURE_ALIGNMENT_SEARCH_MS = 2_000
 MIN_FIXTURE_CORRELATION = 0.85
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +100,14 @@ ARTIFACT_ROOT = REPOSITORY_ROOT / "bench" / "artifacts"
 # calibration, not a frozen Phase 3 measurement profile.
 MAX_STIMULUS_ENERGY_RATIO_ON_AGENT_TRACK = 0.10
 MAX_ABSOLUTE_STIMULUS_CORRELATION = 0.80
+# Receive timestamps are assigned when each WebSocket handler processes a
+# message, not by the network stack.  Two frames selected for the same host-time
+# boundary must therefore be no more than two 20 ms frames apart.
+MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS = 2 * FRAME_MS * 1_000_000
+PROBE_CHANNEL = "channel_a"
+AGENT_CHANNEL = "channel_b"
+
+Capture = BoundedCapture | CrossLegCapture
 
 
 class ProbeState(StrEnum):
@@ -137,6 +148,7 @@ FAILURE_CATEGORIES = frozenset(
         "fixture_match_ambiguous",
         "stimulus_overlap",
         "stimulus_boundary_ambiguous",
+        "cross_channel_alignment_failed",
         "post_stimulus_response_not_observed",
         "capture_limit_reached",
         "socket_error",
@@ -439,7 +451,12 @@ class ProbeController:
         self.streams_started: set[str] = set()
         self.bridge_sent = False
         self.bridge_ready = asyncio.Event()
+        self.measurement_ready = asyncio.Event()
+        self.media_ready_ns: dict[str, int] = {}
+        self.measurement_start_ns: int | None = None
         self.probe_socket_active = False
+        self.agent_socket_active = False
+        self.capture: CrossLegCapture | None = None
         self.states: list[ProbeState] = []
         self.failure: str | None = None
         self.agent: VoiceAgent | None = None
@@ -456,6 +473,23 @@ class ProbeController:
             "events.jsonl",
             {"event": "probe_started", "host_monotonic_ns": self.started_ns},
         )
+
+    def capture_after_authentication(self) -> CrossLegCapture:
+        """Allocate shared capture only after one socket has authenticated."""
+        if self.capture is None:
+            self.capture = CrossLegCapture(
+                (PROBE_CHANNEL, AGENT_CHANNEL),
+                max_bytes_per_channel=MAX_CAPTURE_BYTES_PER_TRACK,
+                max_event_rows=MAX_EVENT_ROWS,
+            )
+        return self.capture
+
+    def mark_media_ready(self, channel: str, receive_ns: int) -> None:
+        """Publish the common start only after both authenticated starts arrive."""
+        self.media_ready_ns.setdefault(channel, receive_ns)
+        if {PROBE_CHANNEL, AGENT_CHANNEL} <= self.media_ready_ns.keys():
+            self.measurement_start_ns = max(self.media_ready_ns.values())
+            self.measurement_ready.set()
 
     def transition(self, state: ProbeState) -> None:
         if state not in self.states:
@@ -612,7 +646,7 @@ class ProbeController:
             "stream_url": (
                 f"{self.config.public_wss_base.rstrip('/')}/ws/{route}/{self.run_id}"
             ),
-            "stream_track": "both_tracks" if role == "probe" else "inbound_track",
+            "stream_track": "inbound_track",
             "stream_bidirectional_mode": "rtp",
             "stream_bidirectional_codec": "L16",
             "stream_bidirectional_sampling_rate": SAMPLE_RATE,
@@ -771,15 +805,173 @@ def validate_artifact_root(root: Path) -> Path:
     return root
 
 
+def _track_boundary(
+    capture: Capture, track: str, boundary_ns: int, *, include_frame: bool = False
+) -> tuple[int, int] | None:
+    """Return (byte offset, observed receive time) at/after a host boundary."""
+    position = 0
+    for frame in capture.frames:
+        if frame.track != track:
+            continue
+        if frame.host_receive_monotonic_ns >= boundary_ns:
+            offset = position + len(frame.pcm16) if include_frame else position
+            return offset, frame.host_receive_monotonic_ns
+        position += len(frame.pcm16)
+    return None
+
+
+def _aligned_host_window(
+    capture: Capture,
+    start_ns: int,
+    end_ns: int | None = None,
+    *,
+    strict: bool = False,
+) -> dict[str, tuple[int, int]] | None:
+    """Map one host-time interval independently onto both socket channels.
+
+    Telnyx does not provide a shared clock across these streams. Host receive
+    time is the only common clock, and is sampled when each async handler
+    processes the message. Boundary skew is consequently bounded and recorded
+    as a hard validity condition rather than treated as sample-accurate time.
+    """
+    first_times = {
+        track: min(
+            (
+                frame.host_receive_monotonic_ns
+                for frame in capture.frames
+                if frame.track == track
+            ),
+            default=None,
+        )
+        for track in capture.tracks
+    }
+    last_times = {
+        track: max(
+            (
+                frame.host_receive_monotonic_ns
+                for frame in capture.frames
+                if frame.track == track
+            ),
+            default=None,
+        )
+        for track in capture.tracks
+    }
+    if any(value is None for value in first_times.values()) or any(
+        value is None for value in last_times.values()
+    ):
+        if strict:
+            raise ProbeProtocolError("cross_channel_alignment_failed")
+        return None
+    complete_first_times = cast("dict[str, int]", first_times)
+    complete_last_times = cast("dict[str, int]", last_times)
+    common_start_ns = max(start_ns, *complete_first_times.values())
+    common_end_ns = min(complete_last_times.values()) if end_ns is None else end_ns
+    if common_end_ns <= common_start_ns:
+        if strict:
+            raise ProbeProtocolError("cross_channel_alignment_failed")
+        return None
+    starts = {
+        track: _track_boundary(capture, track, common_start_ns)
+        for track in capture.tracks
+    }
+    ends = {
+        track: _track_boundary(
+            capture, track, common_end_ns, include_frame=end_ns is None
+        )
+        for track in capture.tracks
+    }
+    if any(value is None for value in (*starts.values(), *ends.values())):
+        if strict:
+            raise ProbeProtocolError("cross_channel_alignment_failed")
+        return None
+    start_values = cast("dict[str, tuple[int, int]]", starts)
+    end_values = cast("dict[str, tuple[int, int]]", ends)
+    if (
+        any(
+            value[1] - common_start_ns > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
+            for value in start_values.values()
+        )
+        or (
+            end_ns is not None
+            and any(
+                value[1] - end_ns > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
+                for value in end_values.values()
+            )
+        )
+        or max(value[1] for value in start_values.values())
+        - min(value[1] for value in start_values.values())
+        > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
+        or max(value[1] for value in end_values.values())
+        - min(value[1] for value in end_values.values())
+        > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
+    ):
+        raise ProbeProtocolError("cross_channel_alignment_failed")
+    ranges = {
+        track: (start_values[track][0], end_values[track][0])
+        for track in capture.tracks
+    }
+    if any(end <= start for start, end in ranges.values()):
+        if strict:
+            raise ProbeProtocolError("cross_channel_alignment_failed")
+        return None
+    return ranges
+
+
+def _fixture_separation_ranges(
+    capture: Capture,
+    stimulus_track: str,
+    fixture_end_byte: int,
+    fixture_end_receive_ns: int,
+) -> tuple[dict[str, tuple[int, int]], int] | None:
+    """Return an exclusive fixture-end silence interval on both channels."""
+    endpoints = {
+        track: _track_boundary(
+            capture, track, fixture_end_receive_ns, include_frame=True
+        )
+        for track in capture.tracks
+    }
+    if any(value is None for value in endpoints.values()):
+        return None
+    complete_endpoints = cast("dict[str, tuple[int, int]]", endpoints)
+    endpoint_times = [value[1] for value in complete_endpoints.values()]
+    if (
+        complete_endpoints[stimulus_track][0] != fixture_end_byte
+        or max(endpoint_times) - min(endpoint_times)
+        > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
+        or any(
+            receive_ns - fixture_end_receive_ns > MAX_CROSS_CHANNEL_BOUNDARY_SKEW_NS
+            for receive_ns in endpoint_times
+        )
+    ):
+        raise ProbeProtocolError("stimulus_boundary_ambiguous")
+    separation_start_ns = max(endpoint_times) + 1
+    post_start_ns = separation_start_ns + SEPARATING_SILENCE_MS * 1_000_000
+    ranges = _aligned_host_window(
+        capture,
+        separation_start_ns,
+        post_start_ns,
+    )
+    if ranges is None:
+        return None
+    if any(
+        ranges[track][0] != complete_endpoints[track][0] for track in capture.tracks
+    ) or any(
+        end - start < SEPARATING_SILENCE_MS * SAMPLE_RATE // 1_000 * SAMPLE_WIDTH
+        for start, end in ranges.values()
+    ):
+        raise ProbeProtocolError("stimulus_boundary_ambiguous")
+    return ranges, post_start_ns
+
+
 def _candidate_agent_track(
-    capture: BoundedCapture, config: DetectorConfig
+    capture: Capture, config: DetectorConfig, *, start_ns: int = 0
 ) -> tuple[str | None, dict[str, DetectorAnalysis], bool]:
-    common_bytes = min(len(pcm) for pcm in capture.tracks.values())
-    if common_bytes == 0:
+    ranges = _aligned_host_window(capture, start_ns)
+    if ranges is None:
         return None, {}, False
     analyses = {
-        track: analyze_acoustic_stop(bytes(pcm[:common_bytes]), config)
-        for track, pcm in capture.tracks.items()
+        track: analyze_acoustic_stop(bytes(capture.tracks[track][start:end]), config)
+        for track, (start, end) in ranges.items()
     }
     candidates = [
         track for track, analysis in analyses.items() if analysis.result is not None
@@ -915,6 +1107,7 @@ def match_fixture_reference(
 class WindowStatistics:
     active_frame_count: int
     frame_count: int
+    sample_count: int
     rms_dbfs: float
     noise_floor_dbfs: float
     peak_absolute_level: int
@@ -930,7 +1123,7 @@ class WindowStatistics:
 def summarize_window(
     pcm16: bytes,
     detector: DetectorConfig,
-    capture: BoundedCapture,
+    capture: Capture,
     *,
     track: str,
     start_byte: int,
@@ -968,6 +1161,7 @@ def summarize_window(
             value >= detector.activity_threshold_dbfs for value in dbfs
         ),
         frame_count=len(selected_frames),
+        sample_count=len(values),
         rms_dbfs=_rms_dbfs(pcm16),
         noise_floor_dbfs=float(statistics.median(quiet)) if quiet else -math.inf,
         peak_absolute_level=max((abs(int(value)) for value in values), default=0),
@@ -1013,7 +1207,7 @@ def analyze_contamination(
 
 def _write_energy_csv(
     path: Path,
-    capture: BoundedCapture,
+    capture: Capture,
     *,
     stimulus_start: Mapping[str, int],
     stimulus_end: Mapping[str, int],
@@ -1063,11 +1257,13 @@ def _write_energy_csv(
             )
 
 
-def _frame_metadata(frame: MediaFrame) -> dict[str, object]:
+def _frame_metadata(
+    frame: MediaFrame, *, channel: str | None = None
+) -> dict[str, object]:
     return {
         "event": "media",
         "sequence_number": frame.sequence_number,
-        "track": frame.track,
+        "track": channel or frame.track,
         "chunk": frame.chunk,
         "timestamp": frame.timestamp,
         "payload_bytes": len(frame.pcm16),
@@ -1076,7 +1272,7 @@ def _frame_metadata(frame: MediaFrame) -> dict[str, object]:
 
 
 def _receive_time_for_track_sample(
-    capture: BoundedCapture, track: str, sample_index: int
+    capture: Capture, track: str, sample_index: int
 ) -> int | None:
     position = 0
     for frame in capture.frames:
@@ -1177,7 +1373,7 @@ def create_app(
         if not hmac.compare_digest(run_id, controller.run_id):
             await ws.close(code=1008)
             return
-        capture: BoundedCapture | None = None
+        capture: CrossLegCapture | None = None
         pacing: PacingSummary | None = None
         agent_track: str | None = None
         stimulus_task: asyncio.Task[PacingSummary] | None = None
@@ -1188,6 +1384,10 @@ def create_app(
         actual_format: MediaFormat | None = None
         natural_analysis: DetectorAnalysis | None = None
         post_analysis: DetectorAnalysis | None = None
+        window_ranges: dict[str, dict[str, tuple[int, int]]] = {}
+        stimulus_start_ns: int | None = None
+        natural_silence_ns: int | None = None
+        natural_confirmation_ns: int | None = None
         message_rows = 0
         first_tracks_seen: set[str] = set()
         if controller.probe_socket_active:
@@ -1198,6 +1398,7 @@ def create_app(
             authorization, connected = await _authenticate_probe_socket(
                 ws, controller, role="probe"
             )
+            capture = controller.capture_after_authentication()
             controller.transition(ProbeState.STREAM_CONNECTED)
             if connected is not None:
                 controller.artifacts.append_jsonl(
@@ -1207,10 +1408,6 @@ def create_app(
                         "host_monotonic_ns": connected.host_receive_monotonic_ns,
                     },
                 )
-            capture = BoundedCapture(
-                max_bytes_per_track=MAX_CAPTURE_BYTES_PER_TRACK,
-                max_event_rows=MAX_EVENT_ROWS,
-            )
             async with asyncio.timeout(config.capture_seconds):
                 while True:
                     raw = await ws.receive_text()
@@ -1221,7 +1418,7 @@ def create_app(
                     if isinstance(frame, ConnectedFrame):
                         continue
                     if isinstance(frame, StartFrame):
-                        capture.observe_non_media(frame)
+                        capture.observe_non_media(PROBE_CHANNEL, frame)
                         validate_authorized_call_id(
                             frame.call_control_id, authorization.call_control_id
                         )
@@ -1233,6 +1430,9 @@ def create_app(
                         )
                         actual_format = frame.media_format
                         controller.transition(ProbeState.MEDIA_FORMAT_VALIDATED)
+                        controller.mark_media_ready(
+                            PROBE_CHANNEL, frame.host_receive_monotonic_ns
+                        )
                         controller.artifacts.append_jsonl(
                             "events.jsonl",
                             {
@@ -1247,25 +1447,35 @@ def create_app(
                             raise ProbeProtocolError("bridge_failed") from exc
                         continue
                     if isinstance(frame, MediaFrame):
-                        capture.append(frame)
+                        capture.append(PROBE_CHANNEL, frame)
                         controller.artifacts.append_jsonl(
-                            "frame_metadata.jsonl", _frame_metadata(frame)
+                            "frame_metadata.jsonl",
+                            _frame_metadata(frame, channel=PROBE_CHANNEL),
                         )
-                        if frame.track not in first_tracks_seen:
-                            first_tracks_seen.add(frame.track)
+                        if PROBE_CHANNEL not in first_tracks_seen:
+                            first_tracks_seen.add(PROBE_CHANNEL)
                             controller.artifacts.append_jsonl(
                                 "events.jsonl",
                                 {
                                     "event": "first_frame_received_by_track",
-                                    "track": frame.track,
+                                    "track": PROBE_CHANNEL,
                                     "host_monotonic_ns": (
                                         frame.host_receive_monotonic_ns
                                     ),
                                 },
                             )
-                        if agent_track is None:
+                        if (
+                            agent_track is None
+                            and controller.measurement_ready.is_set()
+                        ):
+                            if controller.measurement_start_ns is None:
+                                raise ProbeProtocolError(
+                                    "cross_channel_alignment_failed"
+                                )
                             candidate, analyses, ambiguous = _candidate_agent_track(
-                                capture, config.detector
+                                capture,
+                                config.detector,
+                                start_ns=controller.measurement_start_ns,
                             )
                             if ambiguous:
                                 raise ProbeProtocolError("track_ambiguous")
@@ -1281,6 +1491,12 @@ def create_app(
                                     raise ProbeProtocolError(
                                         "natural_stop_not_observed"
                                     )
+                                aligned = _aligned_host_window(
+                                    capture, controller.measurement_start_ns
+                                )
+                                if aligned is None:
+                                    continue
+                                selected_start = aligned[agent_track][0]
                                 active_sample = _first_active_sample(
                                     natural_analysis,
                                     config.detector.activity_threshold_dbfs,
@@ -1295,7 +1511,8 @@ def create_app(
                                             _receive_time_for_track_sample(
                                                 capture,
                                                 agent_track,
-                                                active_sample or 0,
+                                                selected_start // SAMPLE_WIDTH
+                                                + (active_sample or 0),
                                             )
                                         ),
                                     },
@@ -1303,8 +1520,29 @@ def create_app(
                                 boundary_receive_ns = _receive_time_for_track_sample(
                                     capture,
                                     agent_track,
-                                    natural.silence_start_sample,
+                                    selected_start // SAMPLE_WIDTH
+                                    + natural.silence_start_sample,
                                 )
+                                confirmation_receive_ns = (
+                                    _receive_time_for_track_sample(
+                                        capture,
+                                        agent_track,
+                                        selected_start // SAMPLE_WIDTH
+                                        + max(0, natural.confirmation_sample - 1),
+                                    )
+                                )
+                                if (
+                                    boundary_receive_ns is None
+                                    or confirmation_receive_ns is None
+                                ):
+                                    raise ProbeProtocolError(
+                                        "cross_channel_alignment_failed"
+                                    )
+                                natural_silence_ns = boundary_receive_ns
+                                # The detector's confirmation sample is an
+                                # exclusive endpoint; advance beyond its final
+                                # containing frame for host-window slicing.
+                                natural_confirmation_ns = confirmation_receive_ns + 1
                                 controller.artifacts.append_jsonl(
                                     "events.jsonl",
                                     {
@@ -1331,10 +1569,7 @@ def create_app(
                                         ),
                                     },
                                 )
-                                stimulus_start_offsets = {
-                                    track: len(data)
-                                    for track, data in capture.tracks.items()
-                                }
+                                stimulus_start_ns = controller.clock.monotonic_ns()
                                 controller.transition(ProbeState.STIMULUS_STARTED)
                                 stimulus_task = asyncio.create_task(
                                     send_fixture_paced(
@@ -1415,10 +1650,10 @@ def create_app(
                                         }
                                     )
                                 )
-                            relative_available = min(
-                                len(capture.tracks[track])
-                                - stimulus_start_offsets[track]
-                                for track in capture.tracks
+                            if stimulus_start_ns is None:
+                                raise ProbeProtocolError("stimulus_send_failed")
+                            search_ranges = _aligned_host_window(
+                                capture, stimulus_start_ns
                             )
                             required_search_bytes = (
                                 len(config.fixture.frames) * config.fixture.frame_bytes
@@ -1429,21 +1664,18 @@ def create_app(
                             )
                             if (
                                 fixture_match is None
-                                and relative_available >= required_search_bytes
+                                and search_ranges is not None
+                                and all(
+                                    end - start >= required_search_bytes
+                                    for start, end in search_ranges.values()
+                                )
                             ):
                                 matches = {
                                     track: match_fixture_reference(
-                                        bytes(
-                                            capture.tracks[track][
-                                                stimulus_start_offsets[
-                                                    track
-                                                ] : stimulus_start_offsets[track]
-                                                + relative_available
-                                            ]
-                                        ),
+                                        bytes(capture.tracks[track][start:end]),
                                         config.fixture,
                                     )
-                                    for track in capture.tracks
+                                    for track, (start, end) in search_ranges.items()
                                 }
                                 matched = [
                                     (track, match)
@@ -1462,37 +1694,52 @@ def create_app(
                                         "stimulus_boundary_ambiguous"
                                     )
                             if fixture_match is not None and stimulus_track is not None:
-                                separation_bytes = (
-                                    SEPARATING_SILENCE_MS
-                                    * SAMPLE_RATE
-                                    // 1_000
-                                    * SAMPLE_WIDTH
-                                )
-                                boundary_relative = (
-                                    fixture_match.end_byte + separation_bytes
-                                )
-                                if relative_available < boundary_relative:
+                                if agent_track is None:
+                                    raise ProbeProtocolError("track_ambiguous")
+                                selected_agent_track = agent_track
+                                if search_ranges is None:
                                     continue
+                                fixture_end_byte = (
+                                    search_ranges[stimulus_track][0]
+                                    + fixture_match.end_byte
+                                )
+                                fixture_end_receive_ns = _receive_time_for_track_sample(
+                                    capture,
+                                    stimulus_track,
+                                    max(0, fixture_end_byte // SAMPLE_WIDTH - 1),
+                                )
+                                if fixture_end_receive_ns is None:
+                                    continue
+                                separation = _fixture_separation_ranges(
+                                    capture,
+                                    stimulus_track,
+                                    fixture_end_byte,
+                                    fixture_end_receive_ns,
+                                )
+                                if separation is None:
+                                    continue
+                                silence_ranges, post_start_ns = separation
+                                stimulus_ranges = _aligned_host_window(
+                                    capture, stimulus_start_ns, post_start_ns
+                                )
+                                if stimulus_ranges is None:
+                                    continue
+                                stimulus_start_offsets = {
+                                    track: start
+                                    for track, (start, _) in stimulus_ranges.items()
+                                }
+                                stimulus_end_offsets = {
+                                    track: end
+                                    for track, (_, end) in stimulus_ranges.items()
+                                }
                                 stimulus_silence = bytes(
                                     capture.tracks[stimulus_track][
-                                        (
-                                            stimulus_start_offsets[stimulus_track]
-                                            + fixture_match.end_byte
-                                        ) : (
-                                            stimulus_start_offsets[stimulus_track]
-                                            + boundary_relative
-                                        )
+                                        slice(*silence_ranges[stimulus_track])
                                     ]
                                 )
                                 agent_silence = bytes(
-                                    capture.tracks[agent_track][
-                                        (
-                                            stimulus_start_offsets[agent_track]
-                                            + fixture_match.end_byte
-                                        ) : (
-                                            stimulus_start_offsets[agent_track]
-                                            + boundary_relative
-                                        )
+                                    capture.tracks[selected_agent_track][
+                                        slice(*silence_ranges[selected_agent_track])
                                     ]
                                 )
                                 if (
@@ -1507,16 +1754,11 @@ def create_app(
                                     > config.detector.silence_threshold_dbfs
                                 ):
                                     raise ProbeProtocolError("stimulus_overlap")
-                                stimulus_end_offsets = {
-                                    track: stimulus_start_offsets[track]
-                                    + boundary_relative
-                                    for track in capture.tracks
-                                }
                                 stimulus_agent_audio = bytes(
-                                    capture.tracks[agent_track][
+                                    capture.tracks[selected_agent_track][
                                         stimulus_start_offsets[
-                                            agent_track
-                                        ] : stimulus_end_offsets[agent_track]
+                                            selected_agent_track
+                                        ] : stimulus_end_offsets[selected_agent_track]
                                     ]
                                 )
                                 reference_audio = bytes(
@@ -1530,30 +1772,41 @@ def create_app(
                                     stimulus_agent_audio, reference_audio
                                 ).passed:
                                     raise ProbeProtocolError("stimulus_overlap")
-                                controller.transition(ProbeState.STIMULUS_COMPLETED)
-                                common_post_bytes = min(
-                                    len(capture.tracks[track])
-                                    - stimulus_end_offsets[track]
-                                    for track in capture.tracks
+                                if (
+                                    ProbeState.STIMULUS_COMPLETED
+                                    not in controller.states
+                                ):
+                                    controller.transition(ProbeState.STIMULUS_COMPLETED)
+                                post_ranges = _aligned_host_window(
+                                    capture, post_start_ns
                                 )
+                                if post_ranges is None:
+                                    continue
                                 post_audio = bytes(
-                                    capture.tracks[agent_track][
-                                        stimulus_end_offsets[agent_track] : (
-                                            stimulus_end_offsets[agent_track]
-                                            + common_post_bytes
-                                        )
+                                    capture.tracks[selected_agent_track][
+                                        slice(*post_ranges[selected_agent_track])
                                     ]
                                 )
                                 post = analyze_acoustic_stop(
                                     post_audio, config.detector
                                 )
                                 if post.result is not None:
+                                    required_post_samples = (
+                                        post.result.confirmation_sample
+                                        + (
+                                            POST_CONFIRMATION_GUARD_MS
+                                            * SAMPLE_RATE
+                                            // 1_000
+                                        )
+                                    )
+                                    if (
+                                        len(post_audio) // SAMPLE_WIDTH
+                                        < required_post_samples
+                                    ):
+                                        continue
                                     stimulus_post = bytes(
                                         capture.tracks[stimulus_track][
-                                            stimulus_end_offsets[stimulus_track] : (
-                                                stimulus_end_offsets[stimulus_track]
-                                                + common_post_bytes
-                                            )
+                                            slice(*post_ranges[stimulus_track])
                                         ]
                                     )
                                     if any(
@@ -1567,6 +1820,12 @@ def create_app(
                                     ):
                                         raise ProbeProtocolError("track_ambiguous")
                                     post_analysis = post
+                                    window_ranges = {
+                                        "C_verified_stimulus_reference": (
+                                            stimulus_ranges
+                                        ),
+                                        "D_post_stimulus_agent_response": post_ranges,
+                                    }
                                     controller.transition(
                                         ProbeState.POST_STIMULUS_AGENT_AUDIO_OBSERVED
                                     )
@@ -1588,7 +1847,7 @@ def create_app(
                                     break
                         continue
                     if isinstance(frame, MarkFrame):
-                        capture.observe_non_media(frame)
+                        capture.observe_non_media(PROBE_CHANNEL, frame)
                         controller.artifacts.append_jsonl(
                             "events.jsonl",
                             {
@@ -1598,13 +1857,13 @@ def create_app(
                             },
                         )
                     elif isinstance(frame, ErrorFrame):
-                        capture.observe_non_media(frame)
+                        capture.observe_non_media(PROBE_CHANNEL, frame)
                         raise ProbeProtocolError("socket_error")
                     elif isinstance(frame, StopFrame):
-                        capture.observe_non_media(frame)
+                        capture.observe_non_media(PROBE_CHANNEL, frame)
                         break
                     else:
-                        capture.observe_non_media(frame)
+                        capture.observe_non_media(PROBE_CHANNEL, frame)
 
             if capture.ordering.unresolved:
                 raise ProbeProtocolError("media_ordering_anomaly")
@@ -1656,6 +1915,33 @@ def create_app(
             natural_result = natural_analysis.result if natural_analysis else None
             if natural_result is None:
                 raise ProbeProtocolError("natural_stop_not_observed")
+            if (
+                controller.measurement_start_ns is None
+                or natural_silence_ns is None
+                or natural_confirmation_ns is None
+            ):
+                raise ProbeProtocolError("cross_channel_alignment_failed")
+            window_a = _aligned_host_window(
+                capture,
+                controller.measurement_start_ns,
+                natural_silence_ns,
+                strict=True,
+            )
+            window_b = _aligned_host_window(
+                capture,
+                natural_silence_ns,
+                natural_confirmation_ns,
+                strict=True,
+            )
+            if window_a is None or window_b is None:
+                raise ProbeProtocolError("cross_channel_alignment_failed")
+            window_ranges = {
+                "A_agent_only_greeting": window_a,
+                "B_post_greeting_silence": window_b,
+                **window_ranges,
+            }
+            if len(window_ranges) != 4:
+                raise ProbeProtocolError("cross_channel_alignment_failed")
             window_statistics = {
                 track: {
                     name: asdict(
@@ -1668,24 +1954,8 @@ def create_app(
                             end_byte=end,
                         )
                     )
-                    for name, (start, end) in {
-                        "A_agent_only_greeting": (
-                            0,
-                            natural_result.silence_start_sample * 2,
-                        ),
-                        "B_post_greeting_silence": (
-                            natural_result.silence_start_sample * 2,
-                            natural_result.confirmation_sample * 2,
-                        ),
-                        "C_verified_stimulus_reference": (
-                            stimulus_start_offsets[track],
-                            stimulus_end_offsets[track],
-                        ),
-                        "D_post_stimulus_agent_response": (
-                            stimulus_end_offsets[track],
-                            len(data),
-                        ),
-                    }.items()
+                    for name, ranges in window_ranges.items()
+                    for start, end in (ranges[track],)
                 }
                 for track, data in capture.tracks.items()
             }
@@ -1777,19 +2047,47 @@ def create_app(
             return
         agent: VoiceAgent | None = None
         media: MediaStream | None = None
+        capture: CrossLegCapture | None = None
+        message_rows = 0
+        if controller.agent_socket_active:
+            await ws.close(code=1008)
+            return
+        controller.agent_socket_active = True
         try:
             authorization, _ = await _authenticate_probe_socket(
                 ws, controller, role="agent"
             )
+            capture = controller.capture_after_authentication()
             while True:
                 raw = await ws.receive_text()
-                event = decode(raw)
-                if isinstance(event, Start):
+                message_rows += 1
+                if message_rows > MAX_EVENT_ROWS:
+                    raise ProbeProtocolError("capture_limit_reached")
+                event = decode_probe_message(raw, controller.clock.monotonic_ns())
+                if isinstance(event, ConnectedFrame):
+                    continue
+                if isinstance(event, StartFrame):
+                    capture.observe_non_media(AGENT_CHANNEL, event)
                     validate_authorized_call_id(
                         event.call_control_id, authorization.call_control_id
                     )
+                    validate_media_format(
+                        event.media_format,
+                        encoding="L16",
+                        sample_rate=SAMPLE_RATE,
+                        channels=CHANNELS,
+                    )
+                    controller.mark_media_ready(
+                        AGENT_CHANNEL, event.host_receive_monotonic_ns
+                    )
                     if agent is not None:
                         continue
+                    try:
+                        async with asyncio.timeout(STATE_TIMEOUT_SECONDS):
+                            await controller.bridge_ready.wait()
+                            await controller.measurement_ready.wait()
+                    except TimeoutError as exc:
+                        raise ProbeProtocolError("bridge_failed") from exc
                     media = MediaStream(
                         ws,
                         frame_ms=FRAME_MS,
@@ -1806,9 +2104,18 @@ def create_app(
                     media.on_error = agent._on_socket_error
                     controller.agent = agent
                     agent.start()
-                elif isinstance(event, Media) and agent is not None:
-                    agent.handle_audio(event.pcm16)
-                elif isinstance(event, Mark) and agent is not None:
+                elif isinstance(event, MediaFrame):
+                    capture.append(AGENT_CHANNEL, event)
+                    controller.artifacts.append_jsonl(
+                        "frame_metadata.jsonl",
+                        _frame_metadata(event, channel=AGENT_CHANNEL),
+                    )
+                    if agent is not None:
+                        agent.handle_audio(event.pcm16)
+                elif isinstance(event, MarkFrame):
+                    capture.observe_non_media(AGENT_CHANNEL, event)
+                    if agent is None:
+                        continue
                     name = event.name
                     generation = (
                         int(name.split(":", 1)[1])
@@ -1816,12 +2123,19 @@ def create_app(
                         else None
                     )
                     agent.submit_speak_ended(generation)
-                elif isinstance(event, Stop):
+                elif isinstance(event, StopFrame):
+                    capture.observe_non_media(AGENT_CHANNEL, event)
                     break
-                elif isinstance(event, Dtmf | Connected):
+                elif isinstance(event, ErrorFrame):
+                    capture.observe_non_media(AGENT_CHANNEL, event)
+                    raise ProbeProtocolError("socket_error")
+                elif isinstance(event, DtmfFrame):
+                    capture.observe_non_media(AGENT_CHANNEL, event)
                     continue
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
+        except ProbeProtocolError as exc:
+            controller.fail(exc.category)
         except Exception:
             controller.fail("socket_error")
         finally:
@@ -1836,6 +2150,7 @@ def create_app(
             if media is not None:
                 await media.aclose()
             controller.agent = None
+            controller.agent_socket_active = False
             with contextlib.suppress(Exception):
                 await ws.close()
 

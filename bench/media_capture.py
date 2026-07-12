@@ -10,7 +10,7 @@ import json
 import os
 import re
 import secrets
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
 
@@ -120,6 +120,7 @@ class StartFrame:
     sequence_number: int
     stream_id: str
     call_control_id: str
+    from_number: str
     media_format: MediaFormat
     host_receive_monotonic_ns: int
 
@@ -231,6 +232,7 @@ def decode_probe_message(raw: str, host_receive_monotonic_ns: int) -> ProbeFrame
             sequence_number=int(_integer(data.get("sequence_number"), "bad_sequence")),
             stream_id=str(data.get("stream_id", "")),
             call_control_id=str(start.get("call_control_id", "")),
+            from_number=str(start.get("from", "")),
             media_format=MediaFormat(
                 encoding=str(media_format.get("encoding", "")),
                 sample_rate=int(
@@ -421,6 +423,70 @@ class BoundedCapture:
         if isinstance(frame, MediaFrame):
             raise ValueError("media frames must be appended")
         self.ordering.observe_frame(frame)
+
+
+class CombinedOrdering:
+    """Read-only aggregate over independently sequenced WebSocket channels."""
+
+    def __init__(self, orderings: Mapping[str, OrderingTracker]) -> None:
+        self._orderings = orderings
+
+    @property
+    def counts(self) -> OrderingCounts:
+        result = OrderingCounts()
+        for ordering in self._orderings.values():
+            for item in fields(OrderingCounts):
+                setattr(
+                    result,
+                    item.name,
+                    getattr(result, item.name) + getattr(ordering.counts, item.name),
+                )
+        return result
+
+    @property
+    def unresolved(self) -> bool:
+        return any(ordering.unresolved for ordering in self._orderings.values())
+
+
+class CrossLegCapture:
+    """Two isolated socket channels with independent provider sequencing."""
+
+    def __init__(
+        self,
+        channels: tuple[str, str],
+        *,
+        max_bytes_per_channel: int,
+        max_event_rows: int,
+    ) -> None:
+        if len(set(channels)) != 2 or any(not channel for channel in channels):
+            raise ValueError("two distinct capture channels are required")
+        if max_bytes_per_channel <= 0 or max_event_rows <= 0:
+            raise ValueError("capture limits must be positive")
+        self._maximum = max_bytes_per_channel
+        self._max_rows = max_event_rows
+        self.tracks = {channel: bytearray() for channel in channels}
+        self.frames: list[MediaFrame] = []
+        self._orderings = {channel: OrderingTracker() for channel in channels}
+        self.ordering = CombinedOrdering(self._orderings)
+
+    def append(self, channel: str, frame: MediaFrame) -> None:
+        if channel not in self.tracks:
+            raise ProbeProtocolError("track_missing")
+        if len(self.frames) >= self._max_rows:
+            raise CaptureLimitError("capture_limit_reached")
+        target = self.tracks[channel]
+        if len(target) + len(frame.pcm16) > self._maximum:
+            raise CaptureLimitError("capture_limit_reached")
+        target.extend(frame.pcm16)
+        self.frames.append(replace(frame, track=channel))
+        self._orderings[channel].observe_frame(frame)
+
+    def observe_non_media(self, channel: str, frame: ProbeFrame) -> None:
+        if channel not in self._orderings:
+            raise ProbeProtocolError("track_missing")
+        if isinstance(frame, MediaFrame):
+            raise ValueError("media frames must be appended")
+        self._orderings[channel].observe_frame(frame)
 
 
 def new_run_id() -> str:

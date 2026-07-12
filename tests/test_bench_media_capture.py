@@ -16,6 +16,7 @@ from bench.media_capture import (
     BoundedCapture,
     CaptureLimitError,
     ConnectedFrame,
+    CrossLegCapture,
     ErrorFrame,
     MarkFrame,
     MediaFormat,
@@ -293,3 +294,24 @@ def test_global_sequence_accepts_media_mark_dtmf_and_media_interleaving() -> Non
     capture.observe_non_media(dtmf)
     capture.append(second)
     assert not capture.ordering.unresolved
+
+
+def test_cross_leg_capture_keeps_socket_sequences_independent() -> None:
+    capture = CrossLegCapture(
+        ("channel_a", "channel_b"),
+        max_bytes_per_channel=10_000,
+        max_event_rows=20,
+    )
+    channel_a = decode_probe_message(
+        media_raw(track="inbound", sequence=2, chunk=1, timestamp=20), 10
+    )
+    channel_b = decode_probe_message(
+        media_raw(track="inbound", sequence=2, chunk=1, timestamp=20), 11
+    )
+    assert isinstance(channel_a, MediaFrame) and isinstance(channel_b, MediaFrame)
+    capture.append("channel_a", channel_a)
+    capture.append("channel_b", channel_b)
+    assert not capture.ordering.unresolved
+    assert bytes(capture.tracks["channel_a"]) == channel_a.pcm16
+    assert bytes(capture.tracks["channel_b"]) == channel_b.pcm16
+    assert [frame.track for frame in capture.frames] == ["channel_a", "channel_b"]
