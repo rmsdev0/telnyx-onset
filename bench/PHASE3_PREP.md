@@ -1,10 +1,9 @@
 # Phase 3 preparation
 
-**Status:** Phase 3 runtime implementation and offline qualification are
-complete. Two strict-mode live qualification campaigns were invalidated by
-natural-pause false stops. Recalibration review 2 is complete and
-`bench/measurement_profile.json` is refrozen; the complete live qualification
-must now be rerun before final collection.
+**Status:** Phase 3 runtime and live qualification are complete. Two early
+campaigns were invalidated by natural-pause false stops; after recalibration
+review 2 refroze the hold at 600 ms, the complete 20-attempt qualification
+passed with 18/18 eligible trials successful. Final 40+40 collection is next.
 
 ## Where Phase 2 stands (2026-07-13)
 
@@ -40,6 +39,12 @@ must now be rerun before final collection.
   found that three `post_stimulus_echo_detected` harness failures were not
   reflected by the classifier, which now requires the named successful harness
   terminal outcome and otherwise emits `call_transport_failure`.
+- The 600 ms qualification attempted all 20 frozen trials without replacement:
+  transcript was 10/10 eligible and successful; VAD was 8/10 eligible and 8/8
+  successful. The two VAD exclusions were declared stimulus/playback timing
+  collisions. There were no detector, terminal, transport, configuration,
+  action-count, or caller-turn failures among eligible trials. The Section 20
+  gate to final collection passes.
 - Corrected full attempt 6 (`p2-eba91f36fcd7334f`, revision `4227dff`) reached
   `CAPTURE_COMPLETE_PENDING_REVIEW` with enforced delivery, zero voids and RTP
   anomalies, and a passing independent evidence audit.
