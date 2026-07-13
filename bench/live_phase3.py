@@ -55,6 +55,33 @@ def _git_state() -> tuple[str, bool]:
     return commit, clean
 
 
+def _validate_manifest_revision(declared: str, execution: str) -> None:
+    """Allow only the commit that adds the frozen manifest/report after runtime."""
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", declared, execution],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise RuntimeError("phase3 runtime revision is not an ancestor")
+    changed = set(
+        subprocess.run(
+            ["git", "diff", "--name-only", f"{declared}..{execution}"],
+            cwd=REPOSITORY_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+    )
+    allowed = {
+        "bench/phase3_qualification_manifest.json",
+        "bench/phase3_final_manifest.json",
+        "bench/PHASE3_REPORT.md",
+    }
+    if not changed <= allowed:
+        raise RuntimeError("phase3 execution revision changes runtime files")
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     return _object(json.loads(path.read_text(encoding="utf-8")), "json_object_required")
 
@@ -223,7 +250,7 @@ def _classify(
         phase3.get("trial_id") == trial.get("trial_id")
         and phase3.get("condition") == condition.value
         and agent["ready_condition"] == condition.value
-        and harness.get("git_commit") == manifest.get("git", {}).get("commit")
+        and harness.get("git_commit") == manifest.get("execution_commit")
         and harness.get("dirty_tree") is False
         and config_hash is not None
         and agent["profile_sha256"] == profile_record.get("sha256")
@@ -325,8 +352,11 @@ async def run(arguments: argparse.Namespace) -> list[dict[str, object]]:
     commit, clean = _git_state()
     manifest_git = manifest.get("git")
     manifest_git = manifest_git if isinstance(manifest_git, dict) else {}
-    if not clean or manifest_git.get("commit") != commit:
+    declared_commit = manifest_git.get("commit")
+    if not clean or not isinstance(declared_commit, str):
         raise RuntimeError("phase3 manifest revision mismatch")
+    _validate_manifest_revision(declared_commit, commit)
+    manifest["execution_commit"] = commit
     if manifest.get("stage") not in {"qualification", "final"}:
         raise RuntimeError("phase3 manifest stage invalid")
     trials = manifest.get("trials")
