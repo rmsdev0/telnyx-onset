@@ -3,7 +3,8 @@
 **Status:** runtime and mid-playback SIP qualification path implemented and
 offline-qualified; formal live qualification not started.
 
-Runtime revision: `ee99b481860e452f2d89a189d6e15194d3afcc2e`.
+Strict runtime revision: `ee99b481860e452f2d89a189d6e15194d3afcc2e`.
+Qualification harness revision: `fae4dc44f5b744f300214c46d2f7cced9dc9bcca`.
 
 ## Frozen inputs
 
@@ -48,7 +49,7 @@ exactly-once caller-turn preservation, one cancellation and clear action per
 generation, clear failure visibility, frozen-profile validation, deterministic
 ordering, overlapping failure classification, and write-once evidence.
 
-The complete repository gate passes with 225 tests, Ruff, and strict mypy over
+The complete repository gate passes with 228 tests, Ruff, and strict mypy over
 `onset/`, `bench/`, and `tests/`.
 
 ## Prospective qualification order
@@ -65,6 +66,10 @@ reanalysis of agent-only capture `p2-1de191a7ca4e9f33`, samples
 104,960–156,160 at 16 kHz. A replacement prospective manifest will be generated
 from the clean corrected revision before any provider call. Failed attempts
 will not be replaced, and qualification remains excluded from final analysis.
+
+The replacement `bench/phase3_qualification_manifest.json` records clean
+revision `fae4dc4`, the unchanged seed/order, the exact profile hash, the
+1,000 ms mid-playback offset, and the 3,200 ms natural-end reference.
 
 No Phase 3 provider call has been placed. The restore-safe live runner launches
 one fail-closed agent process per scheduled trial, preserves agent/harness
