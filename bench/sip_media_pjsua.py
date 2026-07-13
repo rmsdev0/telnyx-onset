@@ -37,6 +37,12 @@ DISCONNECT_WAIT_S = 10
 JITTER_BUFFER_MS = 60
 VOID_END_PAD_NS = (JITTER_BUFFER_MS + 20) * 1_000_000
 
+# The CLI exits with os._exit immediately after run_live_call returns. Keep
+# SWIG-owned objects alive until that point: destroying a disconnected Call
+# wrapper after PJSUA has already invalidated its call id asserts inside
+# pjsua_call_set_user_data on PJSUA2 2.15.1.
+_LIVE_REFS: list[object] = []
+
 
 class _HarnessPort(pj.AudioMediaPort):  # type: ignore[misc]
     """Pull/push port on the stack's 8 kHz media clock."""
@@ -299,6 +305,19 @@ def run_live_call(
         while True:
             ep.libHandleEvents(EVENT_POLL_MS)
             now_ns = time.monotonic_ns()
+            if bridge.answered and not answered_seen:
+                # Reset the pre-dial hold only after taking the loss-counter
+                # baseline. A normal answer may take longer than the 2 s
+                # watermark-stall bound; that setup latency is not a stalled
+                # post-answer stats poll.
+                answered_seen = True
+                last_stats_ns = now_ns
+                try:
+                    known_loss = int(call.getStreamStat(0).rtcp.rxStat.loss)
+                except pj.Error:
+                    known_loss = 0
+                with bridge.lock:
+                    session.set_scan_watermark(now_ns)
             with bridge.lock:
                 session.tick(now_ns)
                 outcome = session.outcome
@@ -336,15 +355,6 @@ def run_live_call(
                         time.monotonic_ns(),
                         correlation_score=score,
                     )
-            if bridge.answered and not answered_seen:
-                # Interval accounting starts at answer: pre-answer counter
-                # noise must not void (and instantly overrun) the timeline.
-                answered_seen = True
-                last_stats_ns = now_ns
-                try:
-                    known_loss = int(call.getStreamStat(0).rtcp.rxStat.loss)
-                except pj.Error:
-                    known_loss = 0
             if (
                 answered_seen
                 and now_ns - last_stats_ns >= STATS_POLL_NS
@@ -438,3 +448,4 @@ def run_live_call(
         # the bounded destroyer). Artifacts are flushed, the BYE is out, and
         # the CLI hard-exits immediately after this returns, so the OS
         # reclaims the endpoint; SIP session timers bound the far end.
+        _LIVE_REFS.extend((ep, account, call, port, bridge))
