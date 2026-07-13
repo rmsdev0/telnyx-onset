@@ -177,6 +177,31 @@ def test_happy_path_completes_pending_review(tmp_path: Path) -> None:
         assert wav.getnframes() > 0
 
 
+def test_response_with_internal_pause_still_completes(tmp_path: Path) -> None:
+    """A real agent response has speech pauses (live SIP attempt 3).
+
+    The sticky Window-D anchor must survive a mid-response gap so the
+    fixture-length echo-judging window can fill; a per-run anchor never
+    accumulated and the run timed out at the hard cap.
+    """
+    session = _session(tmp_path)
+    driver = Driver(session)
+    driver.answer()
+    driver.run(10, LOUD_8K)
+    driver.run(30, QUIET_8K)
+    assert session.greeting_stop_ns is not None
+    fixture_frames = len(session.config.emitted.pcmu_frames)
+    driver.run(fixture_frames + 10, QUIET_8K)
+    assert session.fixture_end_ns is not None
+    # Response: talk, brief pause, talk again — the anchor must not reset.
+    driver.run(8, LOUD_8K)
+    driver.run(4, QUIET_8K)
+    driver.run(8, LOUD_8K)
+    driver.run(400, QUIET_8K)  # accumulate the echo-judging window
+    assert session._d_candidate_start_window is not None
+    assert session.outcome == "capture_complete_pending_review"
+
+
 def test_setup_blip_cannot_anchor_window_a(tmp_path: Path) -> None:
     """The live-attempt-6 false-anchor failure mode must not recur."""
     session = _session(tmp_path)

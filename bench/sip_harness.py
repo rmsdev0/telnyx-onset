@@ -279,6 +279,7 @@ class SipSession:
         self._silence_start_window: int | None = None
         self._d_run_start_window: int | None = None
         self._d_run_windows = 0
+        self._d_candidate_start_window: int | None = None
         self._echo_snapshot: bytes | None = None
         self._cadence_gate_active = True
         self._pending_metadata: list[dict[str, object]] = []
@@ -651,8 +652,16 @@ class SipSession:
                 if self._d_run_start_window is None:
                     self._d_run_start_window = index
                 self._d_run_windows += 1
-                if self._d_run_windows >= windows_to_arm:
-                    self._prepare_echo_snapshot(now_ns)
+                if (
+                    self._d_run_windows >= windows_to_arm
+                    and self._d_candidate_start_window is None
+                ):
+                    # First confirmed post-boundary activity: freeze its onset
+                    # as the sticky echo-alignment anchor. Later speech pauses
+                    # move the run counter but must not move this anchor, or
+                    # the fixture-length judging window can never fill.
+                    self._d_candidate_start_window = self._d_run_start_window
+                    self._event("window_d_candidate", now_ns)
             else:
                 self._d_run_start_window = None
                 self._d_run_windows = 0
@@ -661,26 +670,26 @@ class SipSession:
             and self._separation_confirmed_ns is None
         ):
             self._evaluate_separating_silence(now_ns)
+        if self._d_candidate_start_window is not None:
+            self._prepare_echo_snapshot(now_ns)
 
     def _prepare_echo_snapshot(self, now_ns: int) -> None:
         """Snapshot Window D audio once enough exists to judge an echo.
 
         The correlation itself is expensive and runs OUTSIDE the media path:
         the driving loop collects the snapshot via pending_echo_check() and
-        returns the verdict via apply_echo_verdict(). Completion is withheld
-        until the snapshot covers the full fixture at the activity's offset,
-        so a fast-arriving echo cannot slip through unjudged.
+        returns the verdict via apply_echo_verdict(). The snapshot begins at
+        the sticky first-activity anchor and is withheld until it spans the
+        full fixture plus the alignment search window, so a delayed echo
+        cannot arrive after a premature completion.
         """
-        assert self._window_d_open_sample_16k is not None
-        assert self._d_run_start_window is not None
-        post_start = self._window_d_open_sample_16k * 2
-        post = bytes(self._rx_16k[post_start:])
-        anchor_byte = self._d_run_start_window * 640 - post_start
-        required = max(0, anchor_byte) + len(self.config.fixture.pcm16)
-        if len(post) < required:
+        assert self._d_candidate_start_window is not None
+        anchor_byte = self._d_candidate_start_window * 640
+        search_bytes = self.config.echo_search_ms * (ANALYSIS_SAMPLE_RATE // 1_000) * 2
+        required_end = anchor_byte + len(self.config.fixture.pcm16) + search_bytes
+        if len(self._rx_16k) < required_end:
             return
-        self._echo_snapshot = post
-        self._event("window_d_candidate", now_ns)
+        self._echo_snapshot = bytes(self._rx_16k[anchor_byte:])
 
     def pending_echo_check(self) -> bytes | None:
         """Window D audio awaiting the off-path fixture correlation."""
