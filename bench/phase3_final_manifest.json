@@ -1,0 +1,510 @@
+{
+  "created_utc": "2026-07-13T17:15:46.626801+00:00",
+  "git": {
+    "clean": true,
+    "commit": "10b7beb8e15e87221a6e226e5fe1d8e5b5858d3a"
+  },
+  "matched_difference": "trigger eligibility only",
+  "measurement_profile": {
+    "path": "bench/measurement_profile.json",
+    "sha256": "4ccca3cd4b63d32da4d10a302889898b815e2303a7d3f210264fb8cd9cc4d2a2"
+  },
+  "ordering": {
+    "algorithm": "balanced-block-shuffle-v1",
+    "attempts_per_condition": 40,
+    "block_per_condition": 2,
+    "failed_attempts_replaced": false,
+    "seed": 2026071306
+  },
+  "qualification_protocol": {
+    "barge_offset_ms": 1000,
+    "harness_mode": "phase3",
+    "natural_end_derivation": "frozen detector reanalysis: samples 104960..156160 at 16 kHz",
+    "natural_end_reference_ms": 3200,
+    "natural_end_reference_run_id": "p2-1de191a7ca4e9f33"
+  },
+  "schema_version": 1,
+  "stage": "final",
+  "trials": [
+    {
+      "attempt_index": 1,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-001"
+    },
+    {
+      "attempt_index": 2,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-002"
+    },
+    {
+      "attempt_index": 3,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-003"
+    },
+    {
+      "attempt_index": 4,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-004"
+    },
+    {
+      "attempt_index": 5,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-005"
+    },
+    {
+      "attempt_index": 6,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-006"
+    },
+    {
+      "attempt_index": 7,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-007"
+    },
+    {
+      "attempt_index": 8,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-008"
+    },
+    {
+      "attempt_index": 9,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-009"
+    },
+    {
+      "attempt_index": 10,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-010"
+    },
+    {
+      "attempt_index": 11,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-011"
+    },
+    {
+      "attempt_index": 12,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-012"
+    },
+    {
+      "attempt_index": 13,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-013"
+    },
+    {
+      "attempt_index": 14,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-014"
+    },
+    {
+      "attempt_index": 15,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-015"
+    },
+    {
+      "attempt_index": 16,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-016"
+    },
+    {
+      "attempt_index": 17,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-017"
+    },
+    {
+      "attempt_index": 18,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-018"
+    },
+    {
+      "attempt_index": 19,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-019"
+    },
+    {
+      "attempt_index": 20,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-020"
+    },
+    {
+      "attempt_index": 21,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-021"
+    },
+    {
+      "attempt_index": 22,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-022"
+    },
+    {
+      "attempt_index": 23,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-023"
+    },
+    {
+      "attempt_index": 24,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-024"
+    },
+    {
+      "attempt_index": 25,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-025"
+    },
+    {
+      "attempt_index": 26,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-026"
+    },
+    {
+      "attempt_index": 27,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-027"
+    },
+    {
+      "attempt_index": 28,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-028"
+    },
+    {
+      "attempt_index": 29,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-029"
+    },
+    {
+      "attempt_index": 30,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-030"
+    },
+    {
+      "attempt_index": 31,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-031"
+    },
+    {
+      "attempt_index": 32,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-032"
+    },
+    {
+      "attempt_index": 33,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-033"
+    },
+    {
+      "attempt_index": 34,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-034"
+    },
+    {
+      "attempt_index": 35,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-035"
+    },
+    {
+      "attempt_index": 36,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-036"
+    },
+    {
+      "attempt_index": 37,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-037"
+    },
+    {
+      "attempt_index": 38,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-038"
+    },
+    {
+      "attempt_index": 39,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-039"
+    },
+    {
+      "attempt_index": 40,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-040"
+    },
+    {
+      "attempt_index": 41,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-041"
+    },
+    {
+      "attempt_index": 42,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-042"
+    },
+    {
+      "attempt_index": 43,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-043"
+    },
+    {
+      "attempt_index": 44,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-044"
+    },
+    {
+      "attempt_index": 45,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-045"
+    },
+    {
+      "attempt_index": 46,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-046"
+    },
+    {
+      "attempt_index": 47,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-047"
+    },
+    {
+      "attempt_index": 48,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-048"
+    },
+    {
+      "attempt_index": 49,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-049"
+    },
+    {
+      "attempt_index": 50,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-050"
+    },
+    {
+      "attempt_index": 51,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-051"
+    },
+    {
+      "attempt_index": 52,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-052"
+    },
+    {
+      "attempt_index": 53,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-053"
+    },
+    {
+      "attempt_index": 54,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-054"
+    },
+    {
+      "attempt_index": 55,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-055"
+    },
+    {
+      "attempt_index": 56,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-056"
+    },
+    {
+      "attempt_index": 57,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-057"
+    },
+    {
+      "attempt_index": 58,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-058"
+    },
+    {
+      "attempt_index": 59,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-059"
+    },
+    {
+      "attempt_index": 60,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-060"
+    },
+    {
+      "attempt_index": 61,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-061"
+    },
+    {
+      "attempt_index": 62,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-062"
+    },
+    {
+      "attempt_index": 63,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-063"
+    },
+    {
+      "attempt_index": 64,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-064"
+    },
+    {
+      "attempt_index": 65,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-065"
+    },
+    {
+      "attempt_index": 66,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-066"
+    },
+    {
+      "attempt_index": 67,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-067"
+    },
+    {
+      "attempt_index": 68,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-068"
+    },
+    {
+      "attempt_index": 69,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-069"
+    },
+    {
+      "attempt_index": 70,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-070"
+    },
+    {
+      "attempt_index": 71,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-071"
+    },
+    {
+      "attempt_index": 72,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-072"
+    },
+    {
+      "attempt_index": 73,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-073"
+    },
+    {
+      "attempt_index": 74,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-074"
+    },
+    {
+      "attempt_index": 75,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-075"
+    },
+    {
+      "attempt_index": 76,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-076"
+    },
+    {
+      "attempt_index": 77,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-077"
+    },
+    {
+      "attempt_index": 78,
+      "condition": "onset-fd-transcript",
+      "status": "scheduled",
+      "trial_id": "p3f-078"
+    },
+    {
+      "attempt_index": 79,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-079"
+    },
+    {
+      "attempt_index": 80,
+      "condition": "onset-fd-vad",
+      "status": "scheduled",
+      "trial_id": "p3f-080"
+    }
+  ]
+}
