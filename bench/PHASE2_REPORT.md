@@ -1023,6 +1023,25 @@ With that final gate satisfied, the selected condition-independent values are
 frozen in `bench/measurement_profile.json`. Phase 2 is empirically GO-capable;
 qualification and comparative collection remain future Phase 3 work.
 
+### Dated recalibration review 1 — 2026-07-13
+
+The first Phase 3 qualification campaign was discarded in full after trial
+`p3q-020` exposed a detector failure. The 300 ms candidate backdated an
+acoustic stop 522.7 ms after fixture onset, but the old response resumed 378.5
+ms later, before the transcript-triggered clear. This is a natural-pause false
+stop, not stale media after a valid stop.
+
+The failed span was pooled without using between-condition effects as an eighth
+human-readable natural-pause calibration label. Repeating the unchanged finite
+grid produced 1,280 records and 76 passing candidates. Applying the original
+selection rule retained the simplest passing threshold (RMS, 20 ms,
+−42/−42 dBFS, 100 ms arm) and advanced only the hold to the shortest passing
+value, 400 ms. The recalibration evidence SHA-256 is
+`ce3f7a72516227f26194dc526028a1a4c9b309133f6a82af8ad62982e5835d7a`.
+The profile is refrozen at that value; qualification must restart from a new
+write-once manifest and no result from the invalidated campaign may enter the
+final comparison.
+
 ### Void-aware additions to the manual review procedure
 
 For any run captured under the loss-void addendum, the manual waveform

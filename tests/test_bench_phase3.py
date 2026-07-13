@@ -102,6 +102,25 @@ def test_formal_manifest_records_commit_profile_and_attempts() -> None:
     assert protocol["natural_end_reference_ms"] == 3_200  # type: ignore[index]
 
 
+def test_requalification_manifest_can_use_a_unique_trial_prefix() -> None:
+    root = Path(__file__).parents[1]
+    manifest = build_manifest(
+        stage="qualification",
+        seed=19,
+        attempts_per_condition=2,
+        trial_prefix="p3q-r1",
+        profile_path=root / "bench" / "measurement_profile.json",
+        repo_root=root,
+        require_clean=False,
+    )
+    assert [trial["trial_id"] for trial in manifest["trials"]] == [  # type: ignore[index]
+        "p3q-r1-001",
+        "p3q-r1-002",
+        "p3q-r1-003",
+        "p3q-r1-004",
+    ]
+
+
 def test_evidence_file_is_write_once(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
     write_new_json(path, {"a": 1})

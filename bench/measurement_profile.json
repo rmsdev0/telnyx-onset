@@ -11,7 +11,7 @@
     "activity_threshold_dbfs": -42.0,
     "silence_threshold_dbfs": -42.0,
     "minimum_active_ms": 100,
-    "sustained_silence_ms": 300
+    "sustained_silence_ms": 400
   },
   "echo_gate": {
     "fixture_envelope_correlation_threshold": 0.85,
@@ -63,7 +63,17 @@
     "maximum_recorded_samples_8k": 560000
   },
   "evidence": {
-    "calibration_evidence_sha256": "21467eebbbaa842ccacd8be828b0fd5432e3b2d51ae9ad5361a0bd1848e53267",
+    "calibration_evidence_sha256": "ce3f7a72516227f26194dc526028a1a4c9b309133f6a82af8ad62982e5835d7a",
+    "prior_calibration_evidence_sha256": "21467eebbbaa842ccacd8be828b0fd5432e3b2d51ae9ad5361a0bd1848e53267",
+    "recalibration_review": {
+      "recorded_date": "2026-07-13",
+      "outcome": "pass",
+      "invalidated_qualification_manifest": "bench/phase3_qualification_manifest.json",
+      "failure_trial_id": "p3q-020",
+      "pooled_label": "qualification1_trial20_resumed_natural_pause",
+      "selection_rule": "same finite grid and shortest passing hold for the existing simplest threshold",
+      "selected_sustained_silence_ms": 400
+    },
     "calibration_controls": {
       "agent_only": "p2-1de191a7ca4e9f33",
       "no_stimulus": "p2-f57fc9336a1784c4",

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from bench.live_phase3 import _agent_evidence
+import json
+
+from bench.live_phase3 import _agent_evidence, _stale_audio_resumed
 from onset.types import BenchmarkMode
 
 
@@ -27,9 +29,7 @@ def test_transcript_final_is_an_eligible_transcript_trigger() -> None:
         _row("caller_turn_completed", 7, turn_id=1),
         _row("next_response_started", 8, caller_turn_id=1),
     ]
-    evidence, config_hash = _agent_evidence(
-        rows, BenchmarkMode.ONSET_FD_TRANSCRIPT
-    )
+    evidence, config_hash = _agent_evidence(rows, BenchmarkMode.ONSET_FD_TRANSCRIPT)
     assert evidence["eligible_trigger_count"] == 1
     assert evidence["interrupt_action_count"] == 1
     assert evidence["caller_turn_count"] == 1
@@ -46,3 +46,36 @@ def test_wrong_source_does_not_become_eligible_and_bad_order_is_visible() -> Non
     evidence, _ = _agent_evidence(rows, BenchmarkMode.ONSET_FD_VAD)
     assert evidence["eligible_trigger_count"] == 0
     assert evidence["event_order_valid"] is False
+
+
+def test_stale_audio_window_uses_the_frozen_detector_values(tmp_path) -> None:
+    rows = [
+        {
+            "host_receive_monotonic_ns": 350_000_000,
+            "rms_dbfs": -30.0,
+        },
+        {
+            "host_receive_monotonic_ns": 450_000_000,
+            "rms_dbfs": -41.0,
+        },
+    ]
+    (tmp_path / "frame_metadata.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows)
+    )
+    assert _stale_audio_resumed(
+        tmp_path,
+        0,
+        500_000_000,
+        sustained_silence_ms=300,
+        activity_threshold_dbfs=-42.0,
+    )
+    assert (
+        _stale_audio_resumed(
+            tmp_path,
+            0,
+            500_000_000,
+            sustained_silence_ms=400,
+            activity_threshold_dbfs=-40.0,
+        )
+        is False
+    )

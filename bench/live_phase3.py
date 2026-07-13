@@ -37,6 +37,8 @@ from onset.types import BenchmarkMode
 
 PROFILE_PATH = REPOSITORY_ROOT / "bench" / "measurement_profile.json"
 FIXTURE_PATH = ARTIFACT_ROOT / "fixtures" / "caller_table_for_two_v1.wav"
+
+
 def _git_state() -> tuple[str, bool]:
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -75,6 +77,7 @@ def _validate_manifest_revision(declared: str, execution: str) -> None:
     )
     allowed = {
         "bench/phase3_qualification_manifest.json",
+        "bench/phase3_qualification_manifest_recalibration1.json",
         "bench/phase3_final_manifest.json",
         "bench/PHASE3_REPORT.md",
     }
@@ -159,9 +162,9 @@ def _agent_evidence(
         and row.get("caller_turn_id") is not None
     ]
     turn_id = turns[0].get("turn_id") if len(turns) == 1 else None
-    next_matches = len(next_responses) == 1 and next_responses[0].get(
-        "caller_turn_id"
-    ) == turn_id
+    next_matches = (
+        len(next_responses) == 1 and next_responses[0].get("caller_turn_id") == turn_id
+    )
     timestamps = [row.get("monotonic_ns") for row in events]
     ordered = True
     previous: int | None = None
@@ -195,11 +198,18 @@ def _agent_evidence(
     )
 
 
-def _stale_audio_resumed(artifact: Path, stop_ns: int, fixture_end_ns: int) -> bool:
+def _stale_audio_resumed(
+    artifact: Path,
+    stop_ns: int,
+    fixture_end_ns: int,
+    *,
+    sustained_silence_ms: int,
+    activity_threshold_dbfs: float,
+) -> bool:
     metadata_path = artifact / "frame_metadata.jsonl"
     if not metadata_path.exists():
         return False
-    confirmation_end = stop_ns + 300_000_000
+    confirmation_end = stop_ns + sustained_silence_ms * 1_000_000
     for row in _load_events(metadata_path):
         host_ns = row.get("host_receive_monotonic_ns")
         rms = row.get("rms_dbfs")
@@ -207,7 +217,7 @@ def _stale_audio_resumed(artifact: Path, stop_ns: int, fixture_end_ns: int) -> b
             isinstance(host_ns, int)
             and isinstance(rms, int | float)
             and confirmation_end <= host_ns < fixture_end_ns
-            and float(rms) >= -42.0
+            and float(rms) >= activity_threshold_dbfs
         ):
             return True
     return False
@@ -220,6 +230,7 @@ def _classify(
     events: list[dict[str, Any]],
     trial: dict[str, Any],
     manifest: dict[str, Any],
+    detector: dict[str, Any],
     expected_config_hash: str | None,
 ) -> tuple[dict[str, object], str | None]:
     condition = BenchmarkMode(str(trial["condition"]))
@@ -238,7 +249,13 @@ def _classify(
         0,
     )
     stale = (
-        _stale_audio_resumed(artifact, stop_ns, fixture_end_ns)
+        _stale_audio_resumed(
+            artifact,
+            stop_ns,
+            fixture_end_ns,
+            sustained_silence_ms=int(detector["sustained_silence_ms"]),
+            activity_threshold_dbfs=float(detector["activity_threshold_dbfs"]),
+        )
         if isinstance(stop_ns, int) and fixture_end_ns
         else False
     )
@@ -322,9 +339,7 @@ def _classify(
             "failure_codes": list(classification.failure_codes),
         },
         "metrics": {
-            "harness_boundary_latency_ms": phase3.get(
-                "harness_boundary_latency_ms"
-            ),
+            "harness_boundary_latency_ms": phase3.get("harness_boundary_latency_ms"),
             "stimulus_start_host_ns": phase3.get("stimulus_start_host_ns"),
             "acoustic_stop_host_ns": stop_ns,
         },
@@ -349,6 +364,8 @@ async def run(arguments: argparse.Namespace) -> list[dict[str, object]]:
     if not arguments.live or os.environ.get("PHASE3_LIVE") != "1":
         raise RuntimeError("phase3 live gates are closed")
     manifest = _load_json(arguments.manifest)
+    profile = _load_json(PROFILE_PATH)
+    detector = _object(profile.get("detector"), "profile detector missing")
     commit, clean = _git_state()
     manifest_git = manifest.get("git")
     manifest_git = manifest_git if isinstance(manifest_git, dict) else {}
@@ -379,120 +396,117 @@ async def run(arguments: argparse.Namespace) -> list[dict[str, object]]:
         httpx.AsyncClient(base_url=API_BASE, headers=headers, timeout=20) as api,
         WebhookLease(api, application_id, arguments.webhook_url),
     ):
-            for raw_trial in trials:
-                trial = _object(raw_trial, "phase3 trial invalid")
-                trial_id = str(trial.get("trial_id", ""))
-                condition = str(trial.get("condition", ""))
-                before = {
-                    path.name
-                    for path in ARTIFACT_ROOT.iterdir()
-                    if path.is_dir() and path.name.startswith("p2-")
+        for raw_trial in trials:
+            trial = _object(raw_trial, "phase3 trial invalid")
+            trial_id = str(trial.get("trial_id", ""))
+            condition = str(trial.get("condition", ""))
+            before = {
+                path.name
+                for path in ARTIFACT_ROOT.iterdir()
+                if path.is_dir() and path.name.startswith("p2-")
+            }
+            event_path = ARTIFACT_ROOT / f"{trial_id}-agent-events.jsonl"
+            server_log_path = ARTIFACT_ROOT / f"{trial_id}-server.log"
+            if event_path.exists() or server_log_path.exists():
+                raise RuntimeError(f"phase3 trial evidence already exists:{trial_id}")
+            server_environment = dict(environment)
+            server_environment.update(
+                {
+                    "HOST": "127.0.0.1",
+                    "PORT": "8001",
+                    "MEDIA_STREAM_URL": media_url,
+                    "HALF_DUPLEX": "false",
+                    "BENCHMARK_MODE": condition,
+                    "BENCHMARK_TRIAL_ID": trial_id,
+                    "BENCHMARK_EVENTS_PATH": str(event_path),
+                    "BENCHMARK_PROFILE_PATH": str(PROFILE_PATH),
+                    "TTS_STREAMING_DECODE": "false",
                 }
-                event_path = ARTIFACT_ROOT / f"{trial_id}-agent-events.jsonl"
-                server_log_path = ARTIFACT_ROOT / f"{trial_id}-server.log"
-                if event_path.exists() or server_log_path.exists():
-                    raise RuntimeError(
-                        f"phase3 trial evidence already exists:{trial_id}"
-                    )
-                server_environment = dict(environment)
-                server_environment.update(
-                    {
-                        "HOST": "127.0.0.1",
-                        "PORT": "8001",
-                        "MEDIA_STREAM_URL": media_url,
-                        "HALF_DUPLEX": "false",
-                        "BENCHMARK_MODE": condition,
-                        "BENCHMARK_TRIAL_ID": trial_id,
-                        "BENCHMARK_EVENTS_PATH": str(event_path),
-                        "BENCHMARK_PROFILE_PATH": str(PROFILE_PATH),
-                        "TTS_STREAMING_DECODE": "false",
-                    }
+            )
+            log_fd = os.open(
+                server_log_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            with os.fdopen(log_fd, "wb") as log_handle:
+                server = subprocess.Popen(
+                    [sys.executable, "-m", "onset"],
+                    cwd=REPOSITORY_ROOT,
+                    env=server_environment,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
                 )
-                log_fd = os.open(
-                    server_log_path,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                    0o600,
-                )
-                with os.fdopen(log_fd, "wb") as log_handle:
-                    server = subprocess.Popen(
-                        [sys.executable, "-m", "onset"],
+                try:
+                    await _wait_health("http://127.0.0.1:8001/health", server)
+                    await _wait_health(public_health, server)
+                    command = [
+                        sys.executable,
+                        "-m",
+                        "bench.sip_harness",
+                        "--live",
+                        "--fixture",
+                        str(arguments.fixture),
+                        "--mode",
+                        "phase3",
+                        "--attempt-number",
+                        str(trial["attempt_index"]),
+                        "--phase3-trial-id",
+                        trial_id,
+                        "--phase3-condition",
+                        condition,
+                        "--activity-threshold-dbfs",
+                        str(detector["activity_threshold_dbfs"]),
+                        "--silence-threshold-dbfs",
+                        str(detector["silence_threshold_dbfs"]),
+                        "--minimum-active-ms",
+                        str(detector["minimum_active_ms"]),
+                        "--sustained-silence-ms",
+                        str(detector["sustained_silence_ms"]),
+                        "--barge-offset-ms",
+                        str(PHASE3_BARGE_OFFSET_MS),
+                        "--natural-end-ms",
+                        str(PHASE3_NATURAL_END_MS),
+                    ]
+                    call_environment = dict(environment)
+                    call_environment["BENCH_LIVE"] = "1"
+                    completed = subprocess.run(
+                        command,
                         cwd=REPOSITORY_ROOT,
-                        env=server_environment,
-                        stdout=log_handle,
-                        stderr=subprocess.STDOUT,
+                        env=call_environment,
+                        check=False,
                     )
-                    try:
-                        await _wait_health("http://127.0.0.1:8001/health", server)
-                        await _wait_health(public_health, server)
-                        command = [
-                            sys.executable,
-                            "-m",
-                            "bench.sip_harness",
-                            "--live",
-                            "--fixture",
-                            str(arguments.fixture),
-                            "--mode",
-                            "phase3",
-                            "--attempt-number",
-                            str(trial["attempt_index"]),
-                            "--phase3-trial-id",
-                            trial_id,
-                            "--phase3-condition",
-                            condition,
-                            "--activity-threshold-dbfs",
-                            "-42",
-                            "--silence-threshold-dbfs",
-                            "-42",
-                            "--minimum-active-ms",
-                            "100",
-                            "--sustained-silence-ms",
-                            "300",
-                            "--barge-offset-ms",
-                            str(PHASE3_BARGE_OFFSET_MS),
-                            "--natural-end-ms",
-                            str(PHASE3_NATURAL_END_MS),
-                        ]
-                        call_environment = dict(environment)
-                        call_environment["BENCH_LIVE"] = "1"
-                        completed = subprocess.run(
-                            command,
-                            cwd=REPOSITORY_ROOT,
-                            env=call_environment,
-                            check=False,
-                        )
-                    finally:
-                        _stop_process(server)
-                artifact = _new_artifact(before)
-                server_log_path.replace(artifact / "server.log")
-                if not event_path.exists():
-                    raise RuntimeError(f"phase3 agent events missing:{trial_id}")
-                moved_events = artifact / "agent_events.jsonl"
-                event_path.replace(moved_events)
-                harness = _load_json(artifact / "manifest.json")
-                events = _load_events(moved_events)
-                record, observed_hash = _classify(
-                    artifact=artifact,
-                    harness=harness,
-                    events=events,
-                    trial=trial,
-                    manifest=manifest,
-                    expected_config_hash=matched_config_hash,
-                )
-                if matched_config_hash is None:
-                    matched_config_hash = observed_hash
-                record["harness_process_returncode"] = completed.returncode
-                _write_json_exclusive(artifact / "phase3_trial.json", record)
-                results.append(record)
-                classification = _object(
-                    record["classification"], "classification invalid"
-                )
-                print(
-                    f"{trial_id} {condition}: "
-                    f"eligible={classification['eligible']} "
-                    f"successful={classification['successful']} "
-                    f"run={artifact.name}",
-                    flush=True,
-                )
+                finally:
+                    _stop_process(server)
+            artifact = _new_artifact(before)
+            server_log_path.replace(artifact / "server.log")
+            if not event_path.exists():
+                raise RuntimeError(f"phase3 agent events missing:{trial_id}")
+            moved_events = artifact / "agent_events.jsonl"
+            event_path.replace(moved_events)
+            harness = _load_json(artifact / "manifest.json")
+            events = _load_events(moved_events)
+            record, observed_hash = _classify(
+                artifact=artifact,
+                harness=harness,
+                events=events,
+                trial=trial,
+                manifest=manifest,
+                detector=detector,
+                expected_config_hash=matched_config_hash,
+            )
+            if matched_config_hash is None:
+                matched_config_hash = observed_hash
+            record["harness_process_returncode"] = completed.returncode
+            _write_json_exclusive(artifact / "phase3_trial.json", record)
+            results.append(record)
+            classification = _object(record["classification"], "classification invalid")
+            print(
+                f"{trial_id} {condition}: "
+                f"eligible={classification['eligible']} "
+                f"successful={classification['successful']} "
+                f"run={artifact.name}",
+                flush=True,
+            )
     _write_json_exclusive(
         arguments.output,
         {

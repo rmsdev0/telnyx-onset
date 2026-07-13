@@ -207,6 +207,7 @@ def build_manifest(
     stage: Literal["qualification", "final"],
     seed: int,
     attempts_per_condition: int,
+    trial_prefix: str | None = None,
     profile_path: Path,
     repo_root: Path,
     require_clean: bool = True,
@@ -218,7 +219,9 @@ def build_manifest(
     order = balanced_condition_order(
         seed=seed, attempts_per_condition=attempts_per_condition
     )
-    prefix = "p3q" if stage == "qualification" else "p3f"
+    prefix = trial_prefix or ("p3q" if stage == "qualification" else "p3f")
+    if not prefix or not prefix.replace("-", "").isalnum():
+        raise ValueError("invalid trial prefix")
     trials = [
         {
             "attempt_index": index,
@@ -298,6 +301,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stage", choices=("qualification", "final"), required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--attempts-per-condition", type=int)
+    parser.add_argument("--trial-prefix")
     parser.add_argument(
         "--profile", type=Path, default=Path("bench/measurement_profile.json")
     )
@@ -317,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         stage=args.stage,
         seed=args.seed,
         attempts_per_condition=args.attempts_per_condition or default_count,
+        trial_prefix=args.trial_prefix,
         profile_path=args.profile.resolve(),
         repo_root=Path.cwd(),
         require_clean=not args.allow_dirty,

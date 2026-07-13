@@ -1,9 +1,10 @@
 # Phase 3 preparation
 
 **Status:** Phase 3 runtime implementation and offline qualification are
-complete. All Phase 2 gates are closed and `bench/measurement_profile.json`
-remains frozen under manual and independent review. Strict-mode live
-qualification and final collection have not begun.
+complete. The first strict-mode live qualification campaign was invalidated by
+a natural-pause false stop. Recalibration review 1 is complete and
+`bench/measurement_profile.json` is refrozen; the complete live qualification
+must now be rerun before final collection.
 
 ## Where Phase 2 stands (2026-07-13)
 
@@ -20,7 +21,15 @@ qualification and final collection have not begun.
   `p2-1de191a7ca4e9f33`, no-stimulus `p2-f57fc9336a1784c4`, and echo-control
   `p2-fb90d83bd3e307a2`.
 - Bounded calibration completed over seven labels and 1,120 records. The
-  selected candidate is RMS, 20 ms, −42/−42 dBFS, 100 ms arm, 300 ms hold.
+  initially selected candidate was RMS, 20 ms, −42/−42 dBFS, 100 ms arm,
+  300 ms hold.
+- The first live qualification campaign invalidated that hold after trial 20
+  exposed a 379 ms natural pause followed by resumed old-response audio.
+  Recalibration review 1 pooled that condition-independent failure as an
+  eighth natural-pause label and repeated the unchanged finite grid (1,280
+  records). The same selection rule retains −42/−42 dBFS and selects the
+  shortest passing hold, 400 ms. The first qualification campaign is discarded
+  in full; a fresh manifest and complete rerun are required.
 - Corrected full attempt 6 (`p2-eba91f36fcd7334f`, revision `4227dff`) reached
   `CAPTURE_COMPLETE_PENDING_REVIEW` with enforced delivery, zero voids and RTP
   anomalies, and a passing independent evidence audit.
