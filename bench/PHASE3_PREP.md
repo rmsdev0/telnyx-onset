@@ -1,9 +1,12 @@
 # Phase 3 preparation
 
-**Status:** Phase 3 runtime and live qualification are complete. Two early
+**Status:** Phase 3 is complete. Runtime, live qualification, final 40+40
+collection, and preregistered analysis are complete. Two early
 campaigns were invalidated by natural-pause false stops; after recalibration
 review 2 refroze the hold at 600 ms, the complete 20-attempt qualification
-passed with 18/18 eligible trials successful. Final 40+40 collection is next.
+passed with 18/18 eligible trials successful. The final comparison recorded
+32/40 successful VAD attempts and 28/40 successful transcript attempts, with a
+640.2 ms transcript-minus-VAD median latency difference.
 
 ## Where Phase 2 stands (2026-07-13)
 

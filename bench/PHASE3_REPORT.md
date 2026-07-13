@@ -1,7 +1,8 @@
 # Phase 3 execution report
 
-**Status:** formal live qualification passed after two documented detector
-recalibrations; final 40+40 collection is ready to freeze and execute.
+**Status:** complete. Formal live qualification passed after two documented
+detector recalibrations; final 40+40 collection and preregistered analysis are
+complete.
 
 Strict runtime revision: `ee99b481860e452f2d89a189d6e15194d3afcc2e`.
 Qualification runtime revision: `1e77224679dc0be74e9b69b44109087fd3b00ccf`.
@@ -113,3 +114,58 @@ remain explicitly separated.
 The restore-safe live runner launches one fail-closed agent process per trial,
 preserves agent/harness evidence together, restores the external webhook in a
 `finally` path, and classifies every scheduled attempt without replacement.
+
+## Final matched comparison
+
+Final manifest `bench/phase3_final_manifest.json` froze balanced-block seed
+`2026071306` at clean runtime revision `10b7beb`; execution revision `241e77c`
+added only that manifest. All 80 scheduled calls were attempted, none was
+replaced, and the exact temporary webhook was absent after restoration. The
+temporary tunnel was then stopped.
+
+| Condition | Attempted | Eligible | Successful | Success / attempted | Success / eligible |
+|---|---:|---:|---:|---:|---:|
+| `onset-fd-vad` | 40 | 35 | 32 | 80.0% | 91.4% |
+| `onset-fd-transcript` | 40 | 33 | 28 | 70.0% | 84.8% |
+
+Successful eligible harness-boundary latencies:
+
+| Condition | Median | IQR | p90 | 95% bootstrap CI for median |
+|---|---:|---:|---:|---:|
+| `onset-fd-vad` | 400.7 ms | 359.9–441.2 ms | 501.5 ms | 361.5–440.0 ms |
+| `onset-fd-transcript` | 1040.9 ms | 856.5–1414.7 ms | 1690.7 ms | 900.6–1211.5 ms |
+
+The preregistered unpaired median difference is **640.2 ms** in the declared
+`transcript − VAD` direction. In this controlled harness and fixture, the
+strict local-VAD trigger therefore stopped returned agent audio earlier while
+also recording the higher observed success rate. This is an implementation-
+and-fixture-specific result, not a claim about all VADs, STT engines, vendors,
+or physical endpoints.
+
+The agent-local action path is tiny in both conditions: trigger-to-request
+medians are 0.506 ms (VAD) and 0.495 ms (transcript); request-to-clear-start
+medians are 0.357 ms and 0.585 ms. The acoustic difference is therefore not
+explained by local interruption bookkeeping after the eligible trigger.
+No agent/harness cross-process timestamp subtraction was performed.
+
+Overlapping failure counts are retained rather than deduplicated. VAD recorded
+five `agent_never_spoke`, five `stimulus_started_without_agent_audio`, and three
+`call_transport_failure` categories. Transcript recorded seven
+`agent_never_spoke`, six `stimulus_started_without_agent_audio`, seven
+`call_transport_failure`, two `trigger_not_observed`, and one each of
+`acoustic_stop_not_found`, `caller_turn_duplicated`, `caller_turn_lost`,
+`instrumentation_failure`, and `stimulus_delivery_failed`. Terminal outcomes
+were 70 clean pending-classification captures, five echo detections, four
+missing post-stimulus responses, and one call with no observed agent audio.
+
+Local ignored evidence hashes:
+
+- final session JSON SHA-256:
+  `db53852068a58d6787c308d4cad9da5bf64cacb4a819800cf92e9a30f3745b3a`;
+- final analysis JSON SHA-256:
+  `fe8d9169d4269629fbab713bf599a6a484043ce940a0ad5dd71debf94d4c814d`.
+
+Re-executing `bench.phase3_analysis` from the raw session and artifact root
+reproduces the committed analysis object exactly. The local artifact tree keeps
+all waveforms and sanitized event records ignored from git; the report commits
+only aggregate, non-secret findings.
