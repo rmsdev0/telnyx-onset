@@ -1,9 +1,9 @@
 # Phase 3 preparation
 
 **Status:** preparation only. Phase 3 has NOT begun. Per `BENCHMARK_PLAN.md`
-§20 and `bench/PHASE2_REPORT.md`, Phase 3 may not start until every
-remaining Phase 2 promotion gate below passes and
-`bench/measurement_profile.json` is frozen under independent review.
+§20 and `bench/PHASE2_REPORT.md`, Phase 3 may not start until the maintainer
+listens to the corrected capture, records agreement, and
+`bench/measurement_profile.json` is frozen.
 
 ## Where Phase 2 stands (2026-07-13)
 
@@ -16,12 +16,29 @@ remaining Phase 2 promotion gate below passes and
   did not enforce fixture-interval transmit-counter deltas.
 - Amendment 1 revision 3 / SIP spec revision 4: in force for calibration
   captures, with delivery enforcement and explicit control modes implemented.
-- `bench/measurement_profile.json`: absent by design, and must remain so
-  until the gates below pass.
+- Calibration controls completed at revision `2afa41d`: agent-only
+  `p2-1de191a7ca4e9f33`, no-stimulus `p2-f57fc9336a1784c4`, and echo-control
+  `p2-fb90d83bd3e307a2`.
+- Bounded calibration completed over seven labels and 1,120 records. The
+  selected candidate is RMS, 20 ms, −42/−42 dBFS, 100 ms arm, 300 ms hold.
+- Corrected full attempt 6 (`p2-eba91f36fcd7334f`, revision `4227dff`) reached
+  `CAPTURE_COMPLETE_PENDING_REVIEW` with enforced delivery, zero voids and RTP
+  anomalies, and a conditionally passing independent evidence audit.
+- `bench/measurement_profile.json`: absent pending the maintainer's corrected
+  RX/TX listening agreement.
 
-## Remaining Phase 2 gates, in order
+## Remaining Phase 2 gate
 
-### 1. Calibration captures (plan §7 and §13, under the SIP topology)
+Open `bench/artifacts/p2-eba91f36fcd7334f/review/manual_review.html`, inspect
+the annotated waveform, and listen to both embedded tracks. Record agreement or
+the specific disagreement in `bench/PHASE2_REPORT.md`. On agreement, create the
+frozen measurement profile with the selected detector, SIP topology and codec,
+fixture hashes, delivery requirements, and loss-void bounds. No new call is
+required.
+
+## Completed Phase 2 work
+
+### 1. Calibration captures — complete
 
 Three classes of separately authorized bounded calls, each with the same
 teardown-and-evidence discipline as attempts 1–5. All audio is synthetic;
@@ -45,7 +62,7 @@ Implementation status: the harness exposes `--mode no-stimulus`,
 fail-closed control-loop variant with a named pending-review outcome, never a
 measurement run. Echo control retains mandatory fixture-delivery deltas.
 
-### 2. Bounded detector calibration (plan §7)
+### 2. Bounded detector calibration — complete
 
 Run the existing `bench/acoustic_stop.evaluate_bounded_calibration` over
 labeled segments cut from the calibration captures plus attempt 5's
@@ -55,7 +72,7 @@ already in code (RMS dBFS statistic, 20 ms windows, threshold pairs, holds
 100–1000 ms). Record every candidate, pass, and named failure; select
 nothing automatically.
 
-### 3. Independent evidence review
+### 3. Independent evidence review — conditional pass
 
 An independent review of: the attempt-5 sanitized evidence and manual
 agreement, the calibration capture results, the chosen detector candidate,
