@@ -4,7 +4,7 @@
 offline-qualified; formal live qualification not started.
 
 Strict runtime revision: `ee99b481860e452f2d89a189d6e15194d3afcc2e`.
-Qualification harness revision: `fae4dc44f5b744f300214c46d2f7cced9dc9bcca`.
+Qualification runtime revision: `1e77224679dc0be74e9b69b44109087fd3b00ccf`.
 
 ## Frozen inputs
 
@@ -68,7 +68,7 @@ from the clean corrected revision before any provider call. Failed attempts
 will not be replaced, and qualification remains excluded from final analysis.
 
 The replacement `bench/phase3_qualification_manifest.json` records clean
-revision `fae4dc4`, the unchanged seed/order, the exact profile hash, the
+revision `1e77224`, the unchanged seed/order, the exact profile hash, the
 1,000 ms mid-playback offset, and the 3,200 ms natural-end reference.
 
 No Phase 3 provider call has been placed. The restore-safe live runner launches
