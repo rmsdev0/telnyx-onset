@@ -555,3 +555,77 @@ collection may not start, until later phases prove:
 Failure of the common-boundary gate is not permission to substitute a provider
 event silently. It requires a dated amendment, another methodology review, and a
 new decision about whether runtime benchmark work should continue.
+
+## 21. Amendments
+
+### Amendment 1 — 2026-07-12: external SIP media-endpoint harness
+
+**Status:** drafted; NOT in force until it passes the methodology review this
+plan requires for amendments. No qualification or final comparative data have
+been collected under any capture path, so no captured data are invalidated by
+this amendment; the Phase 2 live-attempt evidence is retained as evidence and
+is never pooled with measurement data.
+
+**What failed.** The Phase 2 hard gate — one common harness that emits the
+stimulus, captures returned agent audio, and timestamps both on one monotonic
+clock — could not be satisfied by the original capture path, which observed
+provider media streams on Telnyx Call Control legs. Twenty-six bounded live
+attempts established the controlling provider behaviors on this account and
+topology (evidence in `bench/PHASE2_REPORT.md`):
+
+1. A call leg carrying any bidirectional media stream exposes no usable
+   provider-outbound track on any stream attached to that leg (attempts 10,
+   11, 24, 26).
+2. Every inbound-direction surface on the agent leg mirrors the agent's own
+   websocket-injected audio within approximately one millisecond of its
+   delivery to the opposite leg (attempts 21, 22, 24).
+3. Receive-only streams inherit the leg's media context and do not honor
+   codec overrides (attempts 13, 14, 23, 25).
+4. A Call Control-answered harness endpoint transmits no RTP, so
+   delivery-gated provider tracks starve (attempt 24).
+
+The production agent requires its bidirectional stream, so rules 1 and 2
+jointly preclude any clean stimulus-reference channel on the agent leg, and
+rule 1 precludes feeding the agent leg caller audio without destroying the
+returned-agent channel on the harness leg (attempt 26). Per Section 20, this
+failure is not permission to substitute a provider event; it requires this
+dated amendment and another methodology review.
+
+**What changes.** The measurement harness becomes an external SIP media
+endpoint: a local SIP user agent registered against a dedicated Telnyx SIP
+credentials connection places the call to the agent number, terminates media
+itself with the negotiated codec pinned to PCMU, continuously transmits the
+caller line, and records both directions locally. The returned-agent channel
+is the received media recorded at the harness; the stimulus reference is the
+transmitted media recorded at the harness. Emission and capture share one
+process and one monotonic clock by construction. The full specification is
+`bench/SIP_HARNESS_SPEC.md`. The Call Control application, webhook workflow,
+and provider media streaming are removed from the measurement path entirely;
+the agent side keeps the untouched production runtime.
+
+**Why this strengthens rather than weakens the registered method.** The
+primary endpoint is defined at "the controlled harness boundary." The prior
+path approximated stimulus emission with a provider playback command fetched
+over HTTPS — a provider-side handoff — and approximated capture through
+provider stream forks. Under this amendment both endpoint events are genuine
+harness-boundary events. Section 7's capture-channel-separation rule required
+"a topology that exposes an isolated returned-agent channel plus a stimulus
+reference"; the SIP harness satisfies it by construction rather than by
+provider topology.
+
+**What does not change.** The metric name and definition; the frozen detector
+candidate structure and its bounded calibration rules; the window (A–D)
+evidence rules, joint fail-closed track logic, and named failure taxonomy;
+fixture identity, hashing, and integrity rules; trial lifecycle, eligibility,
+success criteria, and sample/stopping policy; the comparison hierarchy and
+allowable claims; privacy, raw-data integrity, and secret-handling rules; all
+Phase 2 promotion gates (manual waveform agreement, bounded calibration,
+independent review) and the prohibition on creating
+`bench/measurement_profile.json` before a manually confirmed, independently
+reviewed live GO.
+
+**Review requirements before any live use.** (1) Methodology review of this
+amendment and the specification; (2) offline validation of the harness
+control loop and analysis reuse against the existing test suite's standards;
+(3) a separately authorized bounded live attempt under the same
+teardown-and-evidence discipline as attempts 1–26.

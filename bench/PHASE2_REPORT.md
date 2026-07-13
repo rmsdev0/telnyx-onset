@@ -504,7 +504,9 @@ open destroys channel A on the probe leg. The Call Control media-streaming
 surface is therefore exhausted for the plan's channel-separation requirement;
 proceeding requires a Telnyx-side correction or the separately approved
 benchmark redesign (an external SIP media-endpoint harness that terminates
-media locally and captures both directions on one host clock).
+media locally and captures both directions on one host clock). That redesign
+is drafted as `BENCHMARK_PLAN.md` Amendment 1 with its specification in
+`bench/SIP_HARNESS_SPEC.md`; both await methodology review.
 
 ## Live attempt log
 
