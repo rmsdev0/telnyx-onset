@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from bench.live_phase3 import _agent_evidence, _stale_audio_resumed
 from onset.types import BenchmarkMode
@@ -48,7 +52,7 @@ def test_wrong_source_does_not_become_eligible_and_bad_order_is_visible() -> Non
     assert evidence["event_order_valid"] is False
 
 
-def test_stale_audio_window_uses_the_frozen_detector_values(tmp_path) -> None:
+def test_stale_audio_window_uses_the_frozen_detector_values(tmp_path: Path) -> None:
     rows = [
         {
             "host_receive_monotonic_ns": 350_000_000,

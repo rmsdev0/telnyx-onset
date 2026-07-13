@@ -30,6 +30,9 @@ must now be rerun before final collection.
   records). The same selection rule retains −42/−42 dBFS and selects the
   shortest passing hold, 400 ms. The first qualification campaign is discarded
   in full; a fresh manifest and complete rerun are required.
+- The first replacement manifest was superseded before dialing when the live
+  harness preflight found test-only type-check failures. No call or measurement
+  artifact was created; the runner now reports this exit before artifact lookup.
 - Corrected full attempt 6 (`p2-eba91f36fcd7334f`, revision `4227dff`) reached
   `CAPTURE_COMPLETE_PENDING_REVIEW` with enforced delivery, zero voids and RTP
   anomalies, and a passing independent evidence audit.

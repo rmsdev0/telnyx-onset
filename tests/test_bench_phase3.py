@@ -113,7 +113,9 @@ def test_requalification_manifest_can_use_a_unique_trial_prefix() -> None:
         repo_root=root,
         require_clean=False,
     )
-    assert [trial["trial_id"] for trial in manifest["trials"]] == [  # type: ignore[index]
+    trials = manifest["trials"]
+    assert isinstance(trials, list)
+    assert [trial["trial_id"] for trial in trials] == [
         "p3q-r1-001",
         "p3q-r1-002",
         "p3q-r1-003",

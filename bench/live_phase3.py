@@ -78,6 +78,7 @@ def _validate_manifest_revision(declared: str, execution: str) -> None:
     allowed = {
         "bench/phase3_qualification_manifest.json",
         "bench/phase3_qualification_manifest_recalibration1.json",
+        "bench/phase3_qualification_manifest_recalibration1b.json",
         "bench/phase3_final_manifest.json",
         "bench/PHASE3_REPORT.md",
     }
@@ -477,6 +478,10 @@ async def run(arguments: argparse.Namespace) -> list[dict[str, object]]:
                     )
                 finally:
                     _stop_process(server)
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"phase3_harness_process_failed:{trial_id}:{completed.returncode}"
+                )
             artifact = _new_artifact(before)
             server_log_path.replace(artifact / "server.log")
             if not event_path.exists():
