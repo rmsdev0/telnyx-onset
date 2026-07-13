@@ -8,3 +8,6 @@ __pycache__/
 .DS_Store
 # Diagnostic audio dumps from scripts/validate_streaming_decode.py
 out_*.wav
+# Local Phase 2 live-call evidence. Synthetic fixtures and sanitized reports
+# elsewhere remain trackable; only raw probe runs are ignored.
+bench/artifacts/
