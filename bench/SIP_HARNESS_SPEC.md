@@ -81,10 +81,19 @@ provider stream topology from the measurement path.
   timestamp, host receive monotonic time, RMS dBFS, peak, clipping count,
   and sample offset. The sample-index-to-monotonic mapping is defined by RTP
   timestamps anchored at the first received frame — never by arrival order.
-- Loss, concealment, duplicate, or jitter-buffer resize events are counted;
-  any such event inside Window C, the separating-silence interval, the
-  sustained-silence stop region, or Window D fails closed as
-  `rx_timeline_discontinuity` (new named category).
+- Loss handling (Amendment 1 addendum, 2026-07-13, after live SIP
+  attempt 4): the stack conceals lost packets before the port surface, so
+  loss is detected by polling stream statistics every 100 ms and localized
+  to its poll interval. A lossy interval is **voided**: its windows certify
+  neither activity nor silence, and every certification run (Window A
+  arming, the stop hold, separating silence, Window D activity) resets
+  across it — a boundary can therefore never be certified over concealed
+  audio. Analysis consumes a window only after its interval's loss verdict
+  (the scan watermark), voids are recorded per-event and in the manifest,
+  and the declared bounds — more than 5 loss events or more than 1 s of
+  voided timeline — fail closed as `rx_timeline_discontinuity`. Real RTP
+  sequence/timestamp anomalies surfaced to the session still fail closed
+  once Window A is anchored.
 - Analysis applies the reviewed G.711 zero-order-hold normalization to form
   the 16 kHz analysis timeline (in force for PCMU capture from attempt 15
   onward; attempts 23 and 25 failed at format gates before media capture).

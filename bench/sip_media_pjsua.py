@@ -26,7 +26,9 @@ if TYPE_CHECKING:
 
 import pjsua2 as pj
 
-STATS_POLL_NS = 500_000_000
+# Loss localization granularity: each poll interval is the void unit, so a
+# lost packet costs at most this much certified timeline (plus run resets).
+STATS_POLL_NS = 100_000_000
 EVENT_POLL_MS = 20
 DISCONNECT_WAIT_S = 10
 
@@ -236,14 +238,21 @@ def run_live_call(
                 and bridge.answered
                 and call.isActive()
             ):
-                last_stats_ns = now_ns
                 try:
                     stat = call.getStreamStat(0)
                     loss = int(stat.rtcp.rxStat.loss)
-                    if loss > known_loss:
-                        with bridge.lock:
-                            session.report_rx_loss(loss - known_loss, now_ns)
-                        known_loss = loss
+                    with bridge.lock:
+                        if loss > known_loss:
+                            session.report_rx_loss(
+                                loss - known_loss, last_stats_ns, now_ns
+                            )
+                        # Windows are certified only once their interval's
+                        # loss verdict is in.
+                        session.set_scan_watermark(now_ns)
+                    known_loss = loss
+                    # Only advance on success: a failed poll leaves its span
+                    # to be verdicted (and if lossy, voided) by the next one.
+                    last_stats_ns = now_ns
                     delivery = {
                         "tx_packets": int(stat.rtcp.txStat.pkt),
                         "tx_bytes": int(stat.rtcp.txStat.bytes),

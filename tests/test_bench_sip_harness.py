@@ -291,6 +291,69 @@ def test_fixture_echo_after_boundary_fails_closed(tmp_path: Path) -> None:
     assert session.outcome == "post_stimulus_echo_detected"
 
 
+def test_reported_loss_voids_interval_but_run_completes(tmp_path: Path) -> None:
+    """One lost packet during the response window is voided, not fatal."""
+    session = _session(tmp_path)
+    driver = Driver(session)
+    driver.answer()
+    _drive_to_armed(driver)
+    for _ in range(60):
+        if session.fixture_end_ns is not None:
+            break
+        driver.exchange(QUIET_8K)
+    driver.run(8, QUIET_8K)  # separating silence confirmed
+    driver.run(4, LOUD_8K)  # response begins
+    session.report_rx_loss(1, driver.now_ns - 4 * NS_PER_FRAME, driver.now_ns)
+    driver.run(10, LOUD_8K)  # response continues past the voided interval
+    driver.run(400, QUIET_8K)
+    assert session.outcome == "capture_complete_pending_review"
+    session.finalize(teardown_result="hangup_sent", now_ns=driver.now_ns)
+    manifest = json.loads((session.artifacts.path / "manifest.json").read_text())
+    assert manifest["rx_void_events"] == 1
+    assert manifest["rtp_rx_counters"]["reported_loss"] == 1
+
+
+def test_void_prevents_silence_certification_across_it(tmp_path: Path) -> None:
+    """A stop can never be certified over concealed audio."""
+    session = _session(tmp_path)
+    driver = Driver(session)
+    driver.answer()
+    driver.run(10, LOUD_8K)
+    driver.run(10, QUIET_8K)  # 200 ms into the 500 ms hold
+    void_start = driver.now_ns - 2 * NS_PER_FRAME
+    session.report_rx_loss(1, void_start, driver.now_ns)
+    driver.run(10, QUIET_8K)
+    # 400 ms of quiet elapsed, but the run reset at the void: not certified.
+    assert session.greeting_stop_ns is None
+    driver.run(30, QUIET_8K)  # a clean 500 ms after the void certifies
+    assert session.greeting_stop_ns is not None
+    assert session.greeting_stop_ns > void_start
+
+
+def test_void_bounds_fail_closed(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    driver = Driver(session)
+    driver.answer()
+    driver.run(3, QUIET_8K)
+    for i in range(6):  # beyond MAX_RX_VOID_EVENTS
+        session.report_rx_loss(
+            1, driver.now_ns + i * 1_000_000, driver.now_ns + i * 1_000_000 + 1
+        )
+    assert session.outcome == "rx_timeline_discontinuity"
+
+
+def test_scan_watermark_defers_certification(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    driver = Driver(session)
+    driver.answer()
+    session.set_scan_watermark(driver.now_ns - 1)  # nothing verdicted yet
+    driver.run(10, LOUD_8K)
+    assert session.anchor_ns is None  # frames exist but are unconsumed
+    session.set_scan_watermark(driver.now_ns)
+    session.tick(driver.now_ns)
+    assert session.anchor_ns is not None
+
+
 def test_rtp_gap_after_anchor_is_timeline_discontinuity(tmp_path: Path) -> None:
     session = _session(tmp_path)
     driver = Driver(session)

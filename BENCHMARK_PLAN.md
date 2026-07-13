@@ -685,3 +685,35 @@ calibration captures under the SIP topology (no-stimulus, stimulus-echo,
 agent-only) before any detector freeze; (4) a separately authorized bounded
 live attempt under the same teardown-and-evidence discipline as attempts
 1–26.
+
+### Amendment 1 addendum — 2026-07-13: bounded, recorded loss voids
+
+**Status:** drafted with the same standing as Amendment 1; pending the same
+final methodology review. Motivating evidence: live SIP attempt 4 passed
+every stage through separating silence — the first attempt in the project to
+do so — and then failed closed when exactly one RTP packet of 521 was lost
+during the response window, under the review-mandated rule that any
+in-window loss is fatal.
+
+**What changes.** In-window packet loss no longer fails a run outright.
+Loss is localized to a 100 ms stream-statistics poll interval, and that
+interval is voided: its windows can certify neither activity nor silence,
+every certification run resets across it, and analysis consumes a window
+only after its interval's loss verdict is known. Silence certifications —
+the natural-stop hold and the separating-silence interval — can therefore
+never span concealed audio; loss near a boundary moves or delays the
+boundary rather than fabricating it. Voids are recorded per event and in
+the manifest. Declared bounds: more than five loss events or more than one
+second of voided timeline in a run remains `rx_timeline_discontinuity`.
+
+**What does not change.** Detector thresholds, hold durations, window
+definitions, the emission boundary, all other fail-closed gates, and the
+prohibition on synthetic silence: voided audio is excluded from
+certification, never substituted, and the recorded WAV keeps the stack's
+own concealment output, declared as such.
+
+**Why this is not retry-until-pass.** The alternative to this addendum was
+re-dialing until a call happened to traverse a lossless path, which the
+plan prohibits. Bounded voids make the measurement valid on realistic
+transport while keeping every boundary certification loss-free by
+construction.

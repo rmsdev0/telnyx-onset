@@ -49,6 +49,10 @@ ECHO_SEARCH_MS = 4_000
 # two pulls closer than this invalidate the handoff-equals-wire assumption.
 # Late pulls remain wire-accurate and are recorded as telemetry instead.
 TX_BURST_BOUND_NS = FRAME_MS * 1_000_000 // 2
+# Declared bounds on tolerated, recorded rx concealment (Amendment 1
+# addendum): beyond either bound the transport is unfit for measurement.
+MAX_RX_VOID_EVENTS = 5
+MAX_RX_VOID_TOTAL_NS = 1_000_000_000
 MAX_RECORDED_SAMPLES_8K = (60 + 10) * SAMPLE_RATE_8K
 DECIMATION_RULE = "hamming63_lowpass3400_group_delay_compensated_decimate2"
 
@@ -286,6 +290,15 @@ class SipSession:
         self._last_pull_ns: int | None = None
         self.tx_pull_max_late_ns = 0
         self.tx_pull_min_interval_ns: int | None = None
+        # Loss-void machinery (Amendment 1 addendum): the stack conceals
+        # lost packets before the port surface, so stream-stat loss is
+        # localized to a reported interval whose windows become "unknown" —
+        # they can certify neither activity nor silence, and every
+        # certification run resets across them. The scan watermark holds
+        # analysis back until each interval's loss verdict has arrived.
+        self._rx_voids: list[tuple[int, int]] = []
+        self.rx_void_total_ns = 0
+        self._scan_watermark_ns: int | None = None
         # tx state
         self._tx_pcm_8k = bytearray()
         self._tx_index = 0
@@ -509,21 +522,49 @@ class SipSession:
     def set_delivery_counters(self, counters: dict[str, object]) -> None:
         self.delivery_counters = dict(counters)
 
-    def report_rx_loss(self, packets: int, now_ns: int) -> None:
-        """Stream-stat loss reported by the media layer.
+    def set_scan_watermark(self, watermark_ns: int) -> None:
+        """Analysis may consume rx windows at or before this host time.
 
-        The pull/push port surface has no per-packet RTP headers, so the
-        adapter polls stack stream statistics and reports increases here;
-        loss once the measured windows have begun fails closed.
+        The media layer advances the watermark after each stream-stat poll,
+        so a window is only certified once its poll interval's loss verdict
+        is known. Offline drivers that report loss synchronously may leave
+        the watermark unset.
+        """
+        self._scan_watermark_ns = watermark_ns
+
+    def report_rx_loss(
+        self, packets: int, interval_start_ns: int, now_ns: int
+    ) -> None:
+        """Stream-stat loss localized to the last poll interval.
+
+        The stack conceals lost packets before the port surface, so the
+        concealed audio lies somewhere in [interval_start_ns, now_ns]. That
+        interval is voided: its windows can certify neither activity nor
+        silence, and every certification run resets across it. Bounded and
+        recorded; beyond the declared bounds the transport is unfit and the
+        run fails closed.
         """
         if packets <= 0:
             return
         self.rx_counters["reported_loss"] = (
             int(self.rx_counters.get("reported_loss", 0)) + packets
         )
-        self._event("rx_stream_loss_reported", now_ns, packets=packets)
-        if self.anchor_ns is not None:
+        self._rx_voids.append((interval_start_ns, now_ns))
+        self.rx_void_total_ns += max(0, now_ns - interval_start_ns)
+        self._event(
+            "rx_loss_interval_voided",
+            now_ns,
+            packets=packets,
+            interval_start_ns=interval_start_ns,
+        )
+        if (
+            len(self._rx_voids) > MAX_RX_VOID_EVENTS
+            or self.rx_void_total_ns > MAX_RX_VOID_TOTAL_NS
+        ):
             self._fail("rx_timeline_discontinuity", now_ns)
+
+    def _in_void(self, host_ns: int) -> bool:
+        return any(start <= host_ns <= end for start, end in self._rx_voids)
 
     # ------------------------------------------------------------ analysis
 
@@ -598,7 +639,21 @@ class SipSession:
         while self._scan_index < len(self._rx_frame_rms):
             index = self._scan_index
             host_ns, rms = self._rx_frame_rms[index]
+            if (
+                self._scan_watermark_ns is not None
+                and host_ns > self._scan_watermark_ns
+            ):
+                break
             self._scan_index += 1
+            if self._in_void(host_ns):
+                # Unknown window: certifies neither activity nor silence,
+                # and every certification run resets across it.
+                self._run_start_window = None
+                self._run_windows = 0
+                self._silence_start_window = None
+                self._d_run_start_window = None
+                self._d_run_windows = 0
+                continue
             active = rms >= detector.activity_threshold_dbfs
             silent = rms <= detector.silence_threshold_dbfs
             if self.anchor_ns is None:
@@ -722,6 +777,14 @@ class SipSession:
         needed_ms = self.config.separating_silence_ns // 1_000_000
         run: list[int] = []
         for host, rms in candidates:
+            if (
+                self._scan_watermark_ns is not None
+                and host > self._scan_watermark_ns
+            ):
+                break
+            if self._in_void(host):
+                run = []
+                continue
             if rms <= self.config.detector.silence_threshold_dbfs:
                 run.append(host)
                 if len(run) * FRAME_MS >= needed_ms:
@@ -822,6 +885,12 @@ class SipSession:
                 else self.tx_pull_min_interval_ns / 1_000_000
             ),
             "rtp_rx_counters": dict(self.rx_counters),
+            "rx_void_events": len(self._rx_voids),
+            "rx_void_total_ms": self.rx_void_total_ns // 1_000_000,
+            "rx_void_bounds": {
+                "max_events": MAX_RX_VOID_EVENTS,
+                "max_total_ms": MAX_RX_VOID_TOTAL_NS // 1_000_000,
+            },
             "tx_delivery_counters": self.delivery_counters,
             "emission_boundary_tx_sample_8k": self.emission_boundary_tx_sample,
             "clock": "time.monotonic_ns",
