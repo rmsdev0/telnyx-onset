@@ -314,13 +314,44 @@ def test_non_pcmu_answer_and_renegotiation_fail_closed(tmp_path: Path) -> None:
     assert second.outcome == "media_format_mismatch"
 
 
-def test_tx_cadence_drift_beyond_half_frame_fails_closed(tmp_path: Path) -> None:
+def test_tx_pull_burst_fails_closed_and_lateness_is_telemetry(
+    tmp_path: Path,
+) -> None:
     session = _session(tmp_path)
     session.handle_answered("PCMU", 10_000)
     session.pull_tx_frame(10_000)
-    session.pull_tx_frame(10_000 + NS_PER_FRAME)
-    session.pull_tx_frame(10_000 + 2 * NS_PER_FRAME + 11_000_000)  # +11 ms
+    # A late pull is wire-accurate: recorded, not fatal.
+    session.pull_tx_frame(10_000 + NS_PER_FRAME + 15_000_000)
+    assert session.outcome is None
+    assert session.tx_pull_max_late_ns >= 15_000_000
+    # A burst pull (catch-up batching) invalidates the handoff-equals-wire
+    # assumption and fails closed.
+    session.pull_tx_frame(10_000 + NS_PER_FRAME + 17_000_000)
     assert session.outcome == "media_ordering_anomaly"
+
+
+def test_fast_g711_paths_match_reference_implementations() -> None:
+    from bench.sip_harness import (
+        decode_pcmu_to_pcm16_8k,
+        fast_decode_pcmu_8k_to_pcm16_16k,
+        fast_encode_pcm16_to_pcmu,
+    )
+
+    every_byte = bytes(range(256))
+    assert fast_decode_pcmu_8k_to_pcm16_16k(every_byte) == (
+        decode_pcmu_8k_to_pcm16_16k(every_byte)
+    )
+    # The adapter only ever encodes stack-decoded codebook values, so the
+    # load-bearing property is the round-trip on the codebook, for both
+    # encoders. One byte is excluded by the codec itself: 0x7F (negative
+    # zero) and 0xFF (positive zero) both decode to 0, and every encoder
+    # maps 0 back to 0xFF — acoustically identical.
+    codebook_pcm = decode_pcmu_to_pcm16_8k(every_byte)
+    for encoder in (fast_encode_pcm16_to_pcmu, encode_pcm16_to_pcmu):
+        encoded = encoder(codebook_pcm)
+        for byte in range(256):
+            expected = 0xFF if byte == 0x7F else byte
+            assert encoded[byte] == expected, (encoder.__name__, byte)
 
 
 def test_cross_channel_predicates_use_host_time_not_sample_index(

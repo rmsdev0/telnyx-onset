@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
 MAX_WS_MESSAGE_BYTES = 64 * 1024
 MAX_DECODED_FRAME_BYTES = 64 * 1024
@@ -528,6 +528,21 @@ class ArtifactDirectory:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             handle.write(line + "\n")
+            handle.flush()
+        return path
+
+    def append_jsonl_rows(
+        self, name: str, rows: Sequence[Mapping[str, object]]
+    ) -> Path:
+        """Append many rows with one file open; order is preserved."""
+        path = self._safe_file(name)
+        text = "".join(
+            json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n"
+            for row in rows
+        )
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            handle.write(text)
             handle.flush()
         return path
 

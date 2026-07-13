@@ -13,20 +13,25 @@ import hashlib
 import math
 import os
 import struct
+import warnings
 import wave
 from array import array
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from bench.acoustic_probe import (
-    Fixture,
-    decode_pcmu_8k_to_pcm16_16k,
-)
+with warnings.catch_warnings():
+    # audioop is deprecated for 3.13 but is the only C-speed G.711 path in
+    # the standard library; equivalence with the reviewed pure-Python
+    # reference implementations is pinned by offline tests.
+    warnings.simplefilter("ignore", DeprecationWarning)
+    import audioop
+
 from bench.acoustic_stop import DetectorConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from bench.acoustic_probe import Fixture
     from bench.media_capture import ArtifactDirectory
 
 FRAME_MS = 20
@@ -39,8 +44,11 @@ STATE_TIMEOUT_NS = 15 * 1_000_000_000
 GREETING_HORIZON_NS = 15 * 1_000_000_000
 SEPARATING_SILENCE_NS = 100 * 1_000_000
 ECHO_SEARCH_MS = 4_000
-# Cumulative tx handoff-cadence drift bound: half a frame period.
-TX_DRIFT_BOUND_NS = FRAME_MS * 1_000_000 // 2
+# Burst bound on tx frame requests: the emission stamp equals the wire
+# instant only while the stack's tick clock never batches catch-up pulls, so
+# two pulls closer than this invalidate the handoff-equals-wire assumption.
+# Late pulls remain wire-accurate and are recorded as telemetry instead.
+TX_BURST_BOUND_NS = FRAME_MS * 1_000_000 // 2
 MAX_RECORDED_SAMPLES_8K = (60 + 10) * SAMPLE_RATE_8K
 DECIMATION_RULE = "hamming63_lowpass3400_group_delay_compensated_decimate2"
 
@@ -203,6 +211,21 @@ class SipSessionConfig:
 _SILENCE_PCMU_FRAME = encode_pcm16_to_pcmu(bytes(PCM16_8K_FRAME_BYTES))
 
 
+def fast_encode_pcm16_to_pcmu(pcm16: bytes) -> bytes:
+    """C-speed G.711 encode; equivalence with the reference is test-pinned."""
+    return bytes(audioop.lin2ulaw(pcm16, 2))
+
+
+def fast_decode_pcmu_8k_to_pcm16_16k(payload: bytes) -> bytes:
+    """C-speed reviewed normalization: G.711 expand plus zero-order hold."""
+    lin = array("h")
+    lin.frombytes(audioop.ulaw2lin(payload, 2))
+    doubled = array("h", bytes(len(lin) * 4))
+    doubled[0::2] = lin
+    doubled[1::2] = lin
+    return doubled.tobytes()
+
+
 # Each decoded rx frame is exactly one 20 ms detector window (320 samples at
 # the 16 kHz analysis rate), so the incremental state machine below operates
 # on the per-frame RMS values recorded at ingest. Live attempt 1 (SIP) proved
@@ -258,6 +281,10 @@ class SipSession:
         self._d_run_windows = 0
         self._echo_snapshot: bytes | None = None
         self._cadence_gate_active = True
+        self._pending_metadata: list[dict[str, object]] = []
+        self._last_pull_ns: int | None = None
+        self.tx_pull_max_late_ns = 0
+        self.tx_pull_min_interval_ns: int | None = None
         # tx state
         self._tx_pcm_8k = bytearray()
         self._tx_index = 0
@@ -278,6 +305,12 @@ class SipSession:
         row: dict[str, object] = {"event": name, "host_monotonic_ns": host_ns}
         row.update(extra)
         self.artifacts.append_jsonl("events.jsonl", row)
+
+    def _flush_metadata(self) -> None:
+        if self._pending_metadata:
+            rows = self._pending_metadata
+            self._pending_metadata = []
+            self.artifacts.append_jsonl_rows("frame_metadata.jsonl", rows)
 
     def _fail(self, category: str, host_ns: int) -> None:
         if self.outcome is not None:
@@ -338,14 +371,16 @@ class SipSession:
         if len(self._rx_pcmu) + len(frame.pcmu) > MAX_RECORDED_SAMPLES_8K:
             self._fail("capture_limit_reached", frame.host_receive_monotonic_ns)
             return
-        pcm16 = decode_pcmu_8k_to_pcm16_16k(frame.pcmu)
+        pcm16 = fast_decode_pcmu_8k_to_pcm16_16k(frame.pcmu)
         self._rx_frames.append((len(self._rx_16k), frame.host_receive_monotonic_ns))
         self._rx_pcmu.extend(frame.pcmu)
         self._rx_16k.extend(pcm16)
         rms = self._frame_rms_dbfs(pcm16)
         self._rx_frame_rms.append((frame.host_receive_monotonic_ns, rms))
-        self.artifacts.append_jsonl(
-            "frame_metadata.jsonl",
+        # Metadata rows are buffered and flushed in batches off the per-frame
+        # path: SIP attempt 2 proved per-frame file opens stall the media
+        # clock. Order and append-only discipline are unchanged.
+        self._pending_metadata.append(
             {
                 "track": "rx",
                 "rtp_sequence": frame.rtp_sequence,
@@ -354,7 +389,7 @@ class SipSession:
                 "rms_dbfs": None if rms == -math.inf else round(rms, 2),
                 "payload_bytes": len(pcm16),
                 "source_payload_bytes": len(frame.pcmu),
-            },
+            }
         )
         self._rx_frame_count += 1
         self._check_stimulus_overlap(frame.host_receive_monotonic_ns, rms)
@@ -364,19 +399,34 @@ class SipSession:
         if self._tx_start_ns is None:
             self._tx_start_ns = now_ns
         ideal_ns = self._tx_start_ns + self._tx_index * FRAME_MS * 1_000_000
-        if abs(now_ns - ideal_ns) > TX_DRIFT_BOUND_NS and self.outcome is None:
-            self._event(
-                "tx_cadence_drift",
-                now_ns,
-                drift_ns=now_ns - ideal_ns,
-                frame_index=self._tx_index,
-            )
-            # The cadence gate protects the emission boundary and the
-            # tx-silence guarantee; after separating silence is confirmed the
-            # tx channel is constant silence, so later drift is recorded but
-            # is not a measurement defect.
-            if self._cadence_gate_active:
+        self.tx_pull_max_late_ns = max(self.tx_pull_max_late_ns, now_ns - ideal_ns)
+        if self._last_pull_ns is not None:
+            interval = now_ns - self._last_pull_ns
+            if self.tx_pull_min_interval_ns is None:
+                self.tx_pull_min_interval_ns = interval
+            else:
+                self.tx_pull_min_interval_ns = min(
+                    self.tx_pull_min_interval_ns, interval
+                )
+            # A burst pull means the stack is batching catch-up frames and a
+            # handoff stamp would no longer equal the wire instant; that is
+            # the condition that corrupts the emission boundary. Late pulls
+            # remain wire-accurate and are recorded as telemetry only. The
+            # gate matters only until separating silence is confirmed: tx is
+            # constant silence afterward.
+            if (
+                interval < TX_BURST_BOUND_NS
+                and self._cadence_gate_active
+                and self.outcome is None
+            ):
+                self._event(
+                    "tx_pull_burst",
+                    now_ns,
+                    interval_ns=interval,
+                    frame_index=self._tx_index,
+                )
                 self._fail("media_ordering_anomaly", now_ns)
+        self._last_pull_ns = now_ns
         frame = _SILENCE_PCMU_FRAME
         emitted = self.config.emitted
         if self._fixture_armed and self._fixture_frame_next < len(
@@ -413,6 +463,8 @@ class SipSession:
 
     def tick(self, now_ns: int) -> None:
         """Analysis and deadline enforcement, called off the media path."""
+        if len(self._pending_metadata) >= 25:
+            self._flush_metadata()
         if self.outcome is not None:
             return
         if self.answered_ns is not None and self._rx_frames:
@@ -487,9 +539,7 @@ class SipSession:
         samples.frombytes(pcm16)
         if not samples:
             return -math.inf
-        total = 0
-        for value in samples:
-            total += int(value) * int(value)
+        total = math.sumprod(samples, samples)
         rms = math.sqrt(total / len(samples))
         return -math.inf if rms == 0 else 20.0 * math.log10(rms / 32_768.0)
 
@@ -700,6 +750,7 @@ class SipSession:
     ) -> None:
         if self.teardown_result is None:
             self.teardown_result = teardown_result
+        self._flush_metadata()
         self._write_wav("rx_8k.wav", bytes(self._rx_pcmu), source="pcmu")
         self._write_wav("tx_8k.wav", bytes(self._tx_pcm_8k), source="pcm16")
         emitted = self.config.emitted
@@ -754,7 +805,13 @@ class SipSession:
                 "window_ms": self.config.detector.window_ms,
                 "sample_rate": self.config.detector.sample_rate,
             },
-            "tx_skew_bound_ms": TX_DRIFT_BOUND_NS // 1_000_000,
+            "tx_burst_bound_ms": TX_BURST_BOUND_NS // 1_000_000,
+            "tx_pull_max_late_ms": self.tx_pull_max_late_ns // 1_000_000,
+            "tx_pull_min_interval_ms": (
+                None
+                if self.tx_pull_min_interval_ns is None
+                else self.tx_pull_min_interval_ns / 1_000_000
+            ),
             "rtp_rx_counters": dict(self.rx_counters),
             "tx_delivery_counters": self.delivery_counters,
             "emission_boundary_tx_sample_8k": self.emission_boundary_tx_sample,

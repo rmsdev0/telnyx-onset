@@ -18,7 +18,7 @@ from bench.sip_harness import (
     PCM16_8K_FRAME_BYTES,
     RxFrame,
     decode_pcmu_to_pcm16_8k,
-    encode_pcm16_to_pcmu,
+    fast_encode_pcm16_to_pcmu,
 )
 
 if TYPE_CHECKING:
@@ -39,13 +39,10 @@ class _HarnessPort(pj.AudioMediaPort):  # type: ignore[misc]
         self._bridge = bridge
 
     def onFrameRequested(self, frame: object) -> None:  # noqa: N802
-        pcm = self._bridge.pull_tx_pcm16()
+        buf, size = self._bridge.pull_tx_buffer()
         frame.type = pj.PJMEDIA_FRAME_TYPE_AUDIO  # type: ignore[attr-defined]
-        buf = pj.ByteVector()
-        for byte in pcm:
-            buf.append(byte)
         frame.buf = buf  # type: ignore[attr-defined]
-        frame.size = len(pcm)  # type: ignore[attr-defined]
+        frame.size = size  # type: ignore[attr-defined]
 
     def onFrameReceived(self, frame: object) -> None:  # noqa: N802
         data = bytes(frame.buf)[: frame.size]  # type: ignore[attr-defined]
@@ -93,6 +90,10 @@ class _CallBridge:
         self.local_hangup_sent = False
         self._rx_sequence = 0
         self._rx_timestamp = 0
+        # The tx alphabet is tiny (silence plus the fixture frames), so each
+        # unique PCMU frame maps to one prebuilt ByteVector: no per-frame
+        # conversion or SWIG-element loop on the media clock (attempt 2).
+        self._tx_vector_cache: dict[bytes, object] = {}
 
     @staticmethod
     def _now_ns() -> int:
@@ -114,13 +115,20 @@ class _CallBridge:
             self.port.startTransmit(audio)
             audio.startTransmit(self.port)
 
-    def pull_tx_pcm16(self) -> bytes:
+    def pull_tx_buffer(self) -> tuple[object, int]:
         with self.lock:
             pcmu = self.session.pull_tx_frame(self._now_ns())
         # The stack encodes the conference-bridge PCM back to G.711 for the
         # wire; mu-law is a bijection on its own codebook, so handing it the
         # expansion of our PCMU frame reproduces the exact wire bytes.
-        return decode_pcmu_to_pcm16_8k(pcmu)
+        cached = self._tx_vector_cache.get(pcmu)
+        if cached is None:
+            pcm = decode_pcmu_to_pcm16_8k(pcmu)
+            vector = pj.ByteVector()
+            for byte in pcm:
+                vector.append(byte)
+            cached = self._tx_vector_cache[pcmu] = vector
+        return cached, PCM16_8K_FRAME_BYTES
 
     def push_rx_pcm16(self, pcm16: bytes) -> None:
         if len(pcm16) != PCM16_8K_FRAME_BYTES:
@@ -128,12 +136,11 @@ class _CallBridge:
             return
         with self.lock:
             self._rx_sequence += 1
-            self._rx_timestamp += len(pcm16) // 2
             self.session.handle_rx_frame(
                 RxFrame(
-                    pcmu=encode_pcm16_to_pcmu(pcm16),
+                    pcmu=fast_encode_pcm16_to_pcmu(pcm16),
                     rtp_sequence=self._rx_sequence,
-                    rtp_timestamp=self._rx_timestamp * 0 + self._rx_sequence * 160,
+                    rtp_timestamp=self._rx_sequence * 160,
                     host_receive_monotonic_ns=self._now_ns(),
                 )
             )
@@ -280,20 +287,8 @@ def run_live_call(
                     },
                 },
             )
-        # pjsua2's Python wrappers are prone to destructor-order asserts once
-        # the library is torn down (observed on the first live attempt).
-        # Artifacts are already flushed, so destroy on a bounded side thread
-        # and let the CLI hard-exit rather than risk an abort-shaped teardown.
-        destroyer = threading.Thread(target=_best_effort_destroy(ep), daemon=True)
-        destroyer.start()
-        destroyer.join(timeout=10)
-
-
-def _best_effort_destroy(ep: pj.Endpoint):  # type: ignore[no-untyped-def]
-    def run() -> None:
-        import contextlib
-
-        with contextlib.suppress(Exception):
-            ep.libDestroy()
-
-    return run
+        # No libDestroy: pjsua2 teardown aborted both live attempts (a
+        # destructor-order assert, then an unregistered-thread assert from
+        # the bounded destroyer). Artifacts are flushed, the BYE is out, and
+        # the CLI hard-exits immediately after this returns, so the OS
+        # reclaims the endpoint; SIP session timers bound the far end.
