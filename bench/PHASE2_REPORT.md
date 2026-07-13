@@ -882,6 +882,24 @@ addendum. Artifacts are local and ignored; none are promotion evidence.
   any-in-window-loss rule. This attempt motivates the bounded loss-void
   addendum; its artifact is the addendum's cited evidence.
 
+- 2026-07-13, SIP attempt 5 (revision `1056e28`, artifact
+  `p2-96ddebf9e4d6eb36`): **CAPTURE_COMPLETE_PENDING_REVIEW** — the first in
+  the project across all thirty-one live attempts. The run also validated
+  the loss-void addendum by fire: one packet of 1,244 was lost during the
+  greeting window, its 191 ms poll interval was voided and recorded with
+  rx-sample bounds, and the natural-stop hold restarted past the void
+  rather than certifying across it. Every stage then completed: Window A
+  anchor, natural stop, stimulus emission boundary (tx sample 98,764),
+  verified transmission, separating silence, and a Window D response judged
+  not-an-echo, with zero tx pull lateness and no RTP anomalies. The agent
+  transcribed the fixture and injected a second-generation response. Both
+  ends hung up, the webhook was restored and verified, and the tunnel and
+  server were stopped. Per the promotion gates this is NOT a GO: manual
+  waveform agreement (with the void overlay), fixture-correlation review,
+  bounded detector calibration, the plan §7 SIP-topology calibration
+  captures, and an independent evidence review all remain before any
+  `measurement_profile.json` freeze.
+
 ### Void-aware additions to the manual review procedure
 
 For any run captured under the loss-void addendum, the manual waveform
