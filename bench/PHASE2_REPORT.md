@@ -828,7 +828,7 @@ comparative results, or measurement profile were produced.
 - [x] One authorized monitor-coverage attempt retained.
 - [x] One authorized keeper-format attempt retained.
 - [x] One authorized caller-line keepalive attempt retained.
-- [ ] Manual waveform agreement.
+- [x] Manual waveform agreement (SIP attempt 5, recorded 2026-07-13).
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.
 - [x] Independent sanitized-evidence review confirms empirical NO-GO.
@@ -899,6 +899,38 @@ addendum. Artifacts are local and ignored; none are promotion evidence.
   bounded detector calibration, the plan §7 SIP-topology calibration
   captures, and an independent evidence review all remain before any
   `measurement_profile.json` freeze.
+
+### Manual waveform agreement — SIP attempt 5
+
+Recorded 2026-07-13. The maintainer reviewed run `p2-96ddebf9e4d6eb36`
+against an annotated evidence rendering (two-channel waveforms on one host
+clock with Window A–D bands, the voided interval overlaid at its recorded
+sample bounds, boundary insets, detector window summaries, fixture-envelope
+correlations, and the captured audio) and recorded **agreement** on every
+item of the review procedure, including the void-aware additions below:
+
+- Greeting appears only in Window A on rx (129 active frames, peak
+  −7.6 dBFS) and ends in a genuine natural stop; the backdated boundary
+  sits at the silence onset.
+- tx is silent except the fixture in Window C; the transmitted audio's
+  envelope correlation against the canonical fixture is 0.998.
+- Window C contains zero active rx frames (no overlap, no observed echo of
+  the transmission), followed by the ≥100 ms separating silence.
+- The Window D response begins 7.65 s after the boundary and correlates
+  0.80 against the fixture envelope — below the 0.85 threshold and
+  indistinguishable from the greeting's different-speech baseline of 0.784,
+  corroborating the not-an-echo judgment by ear as well as by number.
+- The single 191 ms void sits mid-greeting, ends 1.12 s before the stop
+  hold begins, and touches no certified interval; manifest void accounting
+  matches the event log and sits within the declared bounds.
+- Transport telemetry: zero tx pull lateness, zero RTP anomalies beyond
+  the one voided loss (1 of 1,244 packets), RTT ≈ 80 ms.
+
+The review rendering, its extracted data, and its generators are preserved
+in the run directory under `review/` (local, ignored). Per the promotion
+rules this agreement does not create a GO: the Section 7 calibration
+captures, bounded detector calibration, and the independent evidence review
+remain.
 
 ### Void-aware additions to the manual review procedure
 
