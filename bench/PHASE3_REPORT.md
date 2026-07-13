@@ -1,7 +1,9 @@
 # Phase 3 execution report
 
-**Status:** runtime implemented and offline-qualified; formal live
-qualification not started.
+**Status:** runtime implemented, offline-qualified, and prospectively ordered;
+formal live qualification not started.
+
+Runtime revision: `ee99b481860e452f2d89a189d6e15194d3afcc2e`.
 
 ## Frozen inputs
 
@@ -45,6 +47,16 @@ Offline tests exercise both strict policies, ineligible-source inertness,
 exactly-once caller-turn preservation, one cancellation and clear action per
 generation, clear failure visibility, frozen-profile validation, deterministic
 ordering, overlapping failure classification, and write-once evidence.
+
+The complete repository gate passes with 225 tests, Ruff, and strict mypy over
+`onset/`, `bench/`, and `tests/`.
+
+## Prospective qualification order
+
+`bench/phase3_qualification_manifest.json` freezes seed `20260713` and 20
+attempted trials (10 per primary condition) in balanced blocks. It records the
+clean runtime revision and exact measurement-profile hash. Failed attempts will
+not be replaced. Qualification evidence remains excluded from final analysis.
 
 No Phase 3 provider call has been placed. The next irreversible/cost-bearing
 step is to commit the runtime revision, create the prospective qualification

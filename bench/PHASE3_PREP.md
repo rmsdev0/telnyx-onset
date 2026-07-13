@@ -1,9 +1,9 @@
 # Phase 3 preparation
 
-**Status:** Phase 3 runtime implementation is underway. All Phase 2 gates are
-closed and `bench/measurement_profile.json` remains frozen under manual and
-independent review. Strict-mode live qualification and final collection have
-not begun.
+**Status:** Phase 3 runtime implementation and offline qualification are
+complete. All Phase 2 gates are closed and `bench/measurement_profile.json`
+remains frozen under manual and independent review. Strict-mode live
+qualification and final collection have not begun.
 
 ## Where Phase 2 stands (2026-07-13)
 
@@ -96,6 +96,11 @@ for qualification/final runs and applies the plan's overlapping failure
 taxonomy without replacing failed attempts. Formal qualification still
 requires a clean committed revision and separately authorized bounded live
 calls through the common SIP boundary.
+
+The prospective qualification manifest is frozen at
+`bench/phase3_qualification_manifest.json`: seed `20260713`, 10 attempted trials
+per primary condition, balanced in four-trial blocks, with no replacement of
+failed attempts.
 
 ## Phase 3 scope
 
