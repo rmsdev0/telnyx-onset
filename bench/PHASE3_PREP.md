@@ -1,9 +1,8 @@
 # Phase 3 preparation
 
-**Status:** preparation only. Phase 3 has NOT begun. Per `BENCHMARK_PLAN.md`
-§20 and `bench/PHASE2_REPORT.md`, Phase 3 may not start until the maintainer
-listens to the corrected capture, records agreement, and
-`bench/measurement_profile.json` is frozen.
+**Status:** ready to begin. Phase 3 has NOT begun. All Phase 2 gates are closed
+and `bench/measurement_profile.json` is frozen under manual and independent
+review.
 
 ## Where Phase 2 stands (2026-07-13)
 
@@ -23,18 +22,18 @@ listens to the corrected capture, records agreement, and
   selected candidate is RMS, 20 ms, −42/−42 dBFS, 100 ms arm, 300 ms hold.
 - Corrected full attempt 6 (`p2-eba91f36fcd7334f`, revision `4227dff`) reached
   `CAPTURE_COMPLETE_PENDING_REVIEW` with enforced delivery, zero voids and RTP
-  anomalies, and a conditionally passing independent evidence audit.
-- `bench/measurement_profile.json`: absent pending the maintainer's corrected
-  RX/TX listening agreement.
+  anomalies, and a passing independent evidence audit.
+- The maintainer inspected the annotated waveform, listened to the corrected
+  RX/TX tracks, and recorded agreement on 2026-07-13.
+- `bench/measurement_profile.json`: frozen; changing any profile value requires
+  recalibration before qualification can resume.
 
-## Remaining Phase 2 gate
+## Phase 2 closeout
 
-Open `bench/artifacts/p2-eba91f36fcd7334f/review/manual_review.html`, inspect
-the annotated waveform, and listen to both embedded tracks. Record agreement or
-the specific disagreement in `bench/PHASE2_REPORT.md`. On agreement, create the
-frozen measurement profile with the selected detector, SIP topology and codec,
-fixture hashes, delivery requirements, and loss-void bounds. No new call is
-required.
+The final corrected-capture agreement and independent evidence pass are recorded
+in `bench/PHASE2_REPORT.md`. The frozen profile contains the selected detector,
+SIP topology and codec, fixture hashes, delivery requirements, loss-void bounds,
+and sanitized evidence identifiers. No further Phase 2 call is required.
 
 ## Completed Phase 2 work
 
@@ -72,7 +71,7 @@ already in code (RMS dBFS statistic, 20 ms windows, threshold pairs, holds
 100–1000 ms). Record every candidate, pass, and named failure; select
 nothing automatically.
 
-### 3. Independent evidence review — conditional pass
+### 3. Independent evidence review — complete
 
 An independent review of: the attempt-5 sanitized evidence and manual
 agreement, the calibration capture results, the chosen detector candidate,

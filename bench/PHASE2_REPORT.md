@@ -2,7 +2,7 @@
 
 ## Verdict
 
-**NO-GO — one manual promotion gate remains**
+**GO — amended SIP measurement profile frozen**
 
 The original Call Control streaming topology was exhausted after twenty-six
 bounded calls. The amended external SIP endpoint then produced five diagnostic
@@ -24,10 +24,10 @@ capture, and independent evidence audit are now complete. Corrected SIP attempt
 6 (`p2-eba91f36fcd7334f`, revision `4227dff`) reached
 `CAPTURE_COMPLETE_PENDING_REVIEW` with enforced fixture-interval delivery and
 the selected detector candidate. Its sanitized waveform evidence agrees with
-the automated record. The remaining promotion action is deliberately human:
-the maintainer must listen to the corrected RX/TX capture and record agreement
-or disagreement. `measurement_profile.json` remains absent until that happens,
-so Phase 3 remains blocked.
+the automated record. The maintainer inspected the annotated waveform, listened
+to both corrected RX/TX tracks, and recorded agreement on 2026-07-13. The
+independent audit therefore passes, `bench/measurement_profile.json` is frozen,
+and Phase 2 is closed. Phase 3 is unblocked but has not begun.
 
 ## Repository and scope
 
@@ -44,7 +44,7 @@ so Phase 3 remains blocked.
 - Branch: `duplex`
 - Methodology authority: `BENCHMARK_PLAN.md`, unchanged
 - Production runtime modules modified: none
-- `bench/measurement_profile.json`: absent pending corrected-capture listening
+- `bench/measurement_profile.json`: frozen under reviewed Phase 2 evidence
 - Comparative benchmark results: none
 
 The probe remains a separate bench-only FastAPI application. Production
@@ -832,15 +832,14 @@ comparative results, or measurement profile were produced.
 - [x] Diagnostic manual waveform agreement (SIP attempt 5, recorded 2026-07-13).
 - [x] Completed bounded calibration.
 - [x] Corrected SIP capture with isolated rx/tx reference and enforced delivery.
-- [ ] Manual waveform agreement on the corrected full capture.
-- [x] Independent review of corrected live and calibration evidence
-  (conditional pass; maintainer listening remains).
+- [x] Manual waveform agreement on the corrected full capture.
+- [x] Independent review of corrected live and calibration evidence.
 - [x] Independent sanitized-evidence review confirms empirical NO-GO.
 
-Phase 3 must not begin while any item remains unchecked. A live failure is
-`NO-GO`, not permission to weaken the endpoint. `measurement_profile.json` may
-be created only after a genuine, manually confirmed, independently reviewed
-live GO.
+All Phase 2 promotion items are checked. The frozen profile is the sole
+measurement authority for qualification; changing a frozen detector, topology,
+codec, fixture, delivery, or loss-void value invalidates qualification and
+requires a dated recalibration review.
 
 ## SIP harness live attempts (Amendment 1)
 
@@ -999,13 +998,30 @@ clean-tree, mode, outcome, and teardown checks:
   table for two.” and the generated response was “Got it, a table for two.
   What date would you like to come in?”, matching the distinct Window-D cluster.
 
-The independent completion audit therefore returns **conditional pass** for
+The independent completion audit therefore returns **pass** for
 the calibration, transport, delivery, separation, not-an-echo, and loss-void
 evidence. The annotated common-clock waveform is internally consistent and a
 self-contained sanitized page with embedded RX/TX audio is preserved under the
-attempt-6 `review/` directory. The audit does not claim the maintainer listened:
-that one manual agreement remains unchecked, and no measurement profile may be
-frozen until it is recorded.
+attempt-6 `review/` directory.
+
+### Manual waveform agreement — corrected SIP attempt 6
+
+Recorded 2026-07-13. The maintainer inspected the annotated common-clock
+waveform for `p2-eba91f36fcd7334f` and listened to both embedded RX/TX tracks,
+then recorded **agreement**. This confirms the manually reviewed evidence:
+
+- the greeting is confined to Window A and its backdated stop marker sits at
+  the genuine silence onset;
+- TX is silent except for the canonical fixture in Window C, while RX remains
+  silent through transmission and the separating interval;
+- the later Window-D cluster is the agent's response, not returned fixture
+  audio, consistent with the 0.803 response correlation below the 0.85 gate;
+- no loss void touches any interval because the corrected run recorded zero
+  loss events, and transport/delivery accounting matches the manifest.
+
+With that final gate satisfied, the selected condition-independent values are
+frozen in `bench/measurement_profile.json`. Phase 2 is empirically GO-capable;
+qualification and comparative collection remain future Phase 3 work.
 
 ### Void-aware additions to the manual review procedure
 
