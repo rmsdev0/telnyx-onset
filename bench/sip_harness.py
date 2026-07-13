@@ -17,7 +17,7 @@ import warnings
 import wave
 from array import array
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 with warnings.catch_warnings():
     # audioop is deprecated for 3.13 but is the only C-speed G.711 path in
@@ -56,8 +56,20 @@ MAX_RX_VOID_TOTAL_NS = 1_000_000_000
 # A frozen scan watermark means loss verdicts stopped arriving; deadline
 # categories would then misattribute a harness fault to agent behavior.
 WATERMARK_STALL_BOUND_NS = 2_000_000_000
+DELIVERY_CONFIRMATION_TIMEOUT_NS = 2_000_000_000
+CONTROL_OBSERVATION_NS = 10_000_000_000
 MAX_RECORDED_SAMPLES_8K = (60 + 10) * SAMPLE_RATE_8K
 DECIMATION_RULE = "hamming63_lowpass3400_group_delay_compensated_decimate2"
+
+CaptureMode = Literal["measurement", "no-stimulus", "echo-control", "agent-only"]
+_SUCCESS_OUTCOMES = frozenset(
+    {
+        "capture_complete_pending_review",
+        "control_no_stimulus_complete_pending_review",
+        "control_echo_complete_pending_review",
+        "control_agent_only_complete_pending_review",
+    }
+)
 
 SIP_FAILURE_CATEGORIES = frozenset(
     {
@@ -207,12 +219,28 @@ class RxFrame:
 class SipSessionConfig:
     fixture: Fixture
     emitted: EmittedFixture
+    mode: CaptureMode = "measurement"
+    attempt_number: int = 1
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     call_cap_ns: int = HARD_CALL_CAP_NS
     state_timeout_ns: int = STATE_TIMEOUT_NS
     greeting_horizon_ns: int = GREETING_HORIZON_NS
     separating_silence_ns: int = SEPARATING_SILENCE_NS
     echo_search_ms: int = ECHO_SEARCH_MS
+    control_observation_ns: int = CONTROL_OBSERVATION_NS
+
+    def __post_init__(self) -> None:
+        if self.mode not in {
+            "measurement",
+            "no-stimulus",
+            "echo-control",
+            "agent-only",
+        }:
+            raise ValueError("unsupported capture mode")
+        if self.control_observation_ns <= 0:
+            raise ValueError("control observation duration must be positive")
+        if self.attempt_number <= 0:
+            raise ValueError("attempt number must be positive")
 
 
 _SILENCE_PCMU_FRAME = encode_pcm16_to_pcmu(bytes(PCM16_8K_FRAME_BYTES))
@@ -288,6 +316,11 @@ class SipSession:
         self._d_run_windows = 0
         self._d_candidate_start_window: int | None = None
         self._echo_snapshot: bytes | None = None
+        self._pending_echo_verdict: tuple[object | None, float | None, int] | None = (
+            None
+        )
+        self.control_fixture_correlation: float | None = None
+        self.control_post_stop_active_frames = 0
         self._cadence_gate_active = True
         self._pending_metadata: list[dict[str, object]] = []
         self._last_pull_ns: int | None = None
@@ -314,6 +347,13 @@ class SipSession:
         self._separation_confirmed_ns: int | None = None
         self._window_d_open_sample_16k: int | None = None
         self.delivery_counters: dict[str, object] | None = None
+        self._latest_delivery_observed_ns: int | None = None
+        self._delivery_baseline: dict[str, int] | None = None
+        self._delivery_baseline_observed_ns: int | None = None
+        self._delivery_end: dict[str, int] | None = None
+        self._delivery_end_observed_ns: int | None = None
+        self._delivery_confirmed = False
+        self._delivery_delta: dict[str, int] | None = None
         self._event("dial_requested", dial_requested_ns)
 
     # ------------------------------------------------------------------ io
@@ -361,6 +401,9 @@ class SipSession:
         # RFC 2833 / comfort-noise payloads: logged, excluded from analysis.
         self._event("telephone_event_excluded", now_ns)
 
+    def handle_unsolicited_inbound_call(self, now_ns: int) -> None:
+        self._event("unsolicited_inbound_call_rejected", now_ns)
+
     def handle_remote_bye(self, now_ns: int) -> None:
         if self.outcome is None:
             self._fail("call_hangup", now_ns)
@@ -393,7 +436,7 @@ class SipSession:
         self._rx_frames.append((len(self._rx_16k), frame.host_receive_monotonic_ns))
         self._rx_pcmu.extend(frame.pcmu)
         self._rx_16k.extend(pcm16)
-        rms = self._frame_rms_dbfs(pcm16)
+        rms, peak, clipping = self._frame_statistics(pcm16)
         self._rx_frame_rms.append((frame.host_receive_monotonic_ns, rms))
         # Metadata rows are buffered and flushed in batches off the per-frame
         # path: SIP attempt 2 proved per-frame file opens stall the media
@@ -406,6 +449,8 @@ class SipSession:
                 "host_receive_monotonic_ns": frame.host_receive_monotonic_ns,
                 "rx_sample_offset_16k": sample_offset_16k,
                 "rms_dbfs": None if rms == -math.inf else round(rms, 2),
+                "peak_absolute_level": peak,
+                "clipping_count": clipping,
                 "payload_bytes": len(pcm16),
                 "source_payload_bytes": len(frame.pcmu),
             }
@@ -458,6 +503,12 @@ class SipSession:
                     self._tx_index * PCMU_FRAME_BYTES + emitted.first_active_sample
                 )
                 self.emission_boundary_ns = now_ns
+                self._delivery_baseline = self._delivery_counter_pair(
+                    self.delivery_counters
+                )
+                self._delivery_baseline_observed_ns = (
+                    self._latest_delivery_observed_ns
+                )
                 self._event(
                     "stimulus_emission_boundary",
                     now_ns,
@@ -503,6 +554,21 @@ class SipSession:
         if now_ns - self.dial_requested_ns >= self.config.call_cap_ns:
             self._fail(self._cap_category(), now_ns)
             return
+        if (
+            self.config.mode in {"measurement", "echo-control"}
+            and self.fixture_end_ns is not None
+            and not self._delivery_confirmed
+            and now_ns - self.fixture_end_ns >= DELIVERY_CONFIRMATION_TIMEOUT_NS
+        ):
+            self._fail("stimulus_send_failed", now_ns)
+            return
+        if (
+            self.config.mode == "no-stimulus"
+            and self.greeting_stop_ns is not None
+            and now_ns - self.greeting_stop_ns >= self.config.control_observation_ns
+        ):
+            self._prepare_no_stimulus_snapshot(now_ns)
+            return
         if self.answered_ns is None:
             if now_ns - self.dial_requested_ns >= self.config.state_timeout_ns:
                 self._fail("answer_timeout", now_ns)
@@ -524,7 +590,8 @@ class SipSession:
             )
             return
         if (
-            self.fixture_end_ns is not None
+            self.config.mode == "measurement"
+            and self.fixture_end_ns is not None
             and self._separation_confirmed_ns is None
             and now_ns
             - self.fixture_end_ns
@@ -534,8 +601,78 @@ class SipSession:
             # boundary: the run has no defensible Window C/D split.
             self._fail("stimulus_boundary_ambiguous", now_ns)
 
-    def set_delivery_counters(self, counters: dict[str, object]) -> None:
+    @staticmethod
+    def _delivery_counter_pair(
+        counters: dict[str, object] | None,
+    ) -> dict[str, int] | None:
+        if counters is None:
+            return None
+        packets = counters.get("tx_packets")
+        octets = counters.get("tx_bytes")
+        if (
+            isinstance(packets, int)
+            and not isinstance(packets, bool)
+            and packets >= 0
+            and isinstance(octets, int)
+            and not isinstance(octets, bool)
+            and octets >= 0
+        ):
+            return {"tx_packets": packets, "tx_bytes": octets}
+        return None
+
+    def observe_delivery_counters(
+        self, counters: dict[str, object], now_ns: int
+    ) -> None:
+        """Record cumulative stack counters and verify fixture delivery.
+
+        The tx WAV is a handoff record, not wire-delivery evidence. Delivery is
+        certified only from monotonic cumulative packet/octet deltas spanning
+        the complete fixture interval.
+        """
+        if self.outcome is not None:
+            return
+        current = self._delivery_counter_pair(counters)
+        if current is None:
+            return
+        previous = self._delivery_counter_pair(self.delivery_counters)
+        if previous is not None and any(
+            current[key] < previous[key] for key in current
+        ):
+            self._fail("stimulus_send_failed", now_ns)
+            return
         self.delivery_counters = dict(counters)
+        self._latest_delivery_observed_ns = now_ns
+        if (
+            self.fixture_end_ns is None
+            or now_ns < self.fixture_end_ns
+            or self._delivery_confirmed
+        ):
+            return
+        baseline = self._delivery_baseline
+        if baseline is None:
+            return
+        delta = {key: current[key] - baseline[key] for key in current}
+        required_packets = len(self.config.emitted.pcmu_frames)
+        required_bytes = required_packets * PCMU_FRAME_BYTES
+        if (
+            delta["tx_packets"] < required_packets
+            or delta["tx_bytes"] < required_bytes
+        ):
+            return
+        self._delivery_end = current
+        self._delivery_end_observed_ns = now_ns
+        self._delivery_delta = delta
+        self._delivery_confirmed = True
+        self._event(
+            "stimulus_delivery_confirmed",
+            now_ns,
+            tx_packet_delta=delta["tx_packets"],
+            tx_byte_delta=delta["tx_bytes"],
+        )
+        if self._pending_echo_verdict is not None:
+            match, score, verdict_ns = self._pending_echo_verdict
+            self._pending_echo_verdict = None
+            self._complete_echo_verdict(match, score, max(now_ns, verdict_ns))
 
     def set_scan_watermark(self, watermark_ns: int) -> None:
         """Analysis may consume rx windows at or before this host time.
@@ -596,6 +733,8 @@ class SipSession:
     # ------------------------------------------------------------ analysis
 
     def _cap_category(self) -> str:
+        if self.config.mode != "measurement" and self.greeting_stop_ns is not None:
+            return "capture_limit_reached"
         if self.emission_boundary_ns is not None:
             return "post_stimulus_response_not_observed"
         if self.anchor_ns is not None:
@@ -603,14 +742,21 @@ class SipSession:
         return "agent_audio_not_observed"
 
     @staticmethod
-    def _frame_rms_dbfs(pcm16: bytes) -> float:
+    def _frame_statistics(pcm16: bytes) -> tuple[float, int, int]:
         samples = array("h")
         samples.frombytes(pcm16)
         if not samples:
-            return -math.inf
+            return -math.inf, 0, 0
         total = math.sumprod(samples, samples)
         rms = math.sqrt(total / len(samples))
-        return -math.inf if rms == 0 else 20.0 * math.log10(rms / 32_768.0)
+        peak = max(abs(int(sample)) for sample in samples)
+        clipping = sum(sample in (-32_768, 32_767) for sample in samples)
+        dbfs = -math.inf if rms == 0 else 20.0 * math.log10(rms / 32_768.0)
+        return dbfs, peak, clipping
+
+    @staticmethod
+    def _frame_rms_dbfs(pcm16: bytes) -> float:
+        return SipSession._frame_statistics(pcm16)[0]
 
     def _observe_rtp_identity(self, frame: RxFrame) -> None:
         expected_step = PCMU_FRAME_BYTES
@@ -676,6 +822,7 @@ class SipSession:
             # the stimulus (it voids instead).
             if (
                 active
+                and self.config.mode == "measurement"
                 and self.emission_boundary_ns is not None
                 and host_ns >= self.emission_boundary_ns
                 and (
@@ -733,10 +880,21 @@ class SipSession:
                             now_ns,
                             backdated_sample_16k=stop_sample,
                         )
-                        self._fixture_armed = True
-                        self._event("stimulus_armed", now_ns)
+                        if self.config.mode == "agent-only":
+                            self.outcome = (
+                                "control_agent_only_complete_pending_review"
+                            )
+                            self._event("control_agent_only_completed", now_ns)
+                            return
+                        if self.config.mode in {"measurement", "echo-control"}:
+                            self._fixture_armed = True
+                            self._event("stimulus_armed", now_ns)
                 else:
                     self._silence_start_window = None
+                continue
+            if self.config.mode in {"no-stimulus", "echo-control"}:
+                if active:
+                    self.control_post_stop_active_frames += 1
                 continue
             if self._window_d_open_sample_16k is None:
                 continue
@@ -761,7 +919,9 @@ class SipSession:
             else:
                 self._d_run_start_window = None
                 self._d_run_windows = 0
-        if (
+        if self.config.mode == "echo-control" and self.fixture_end_ns is not None:
+            self._prepare_echo_control_snapshot(now_ns)
+        elif (
             self.fixture_end_ns is not None
             and self._separation_confirmed_ns is None
         ):
@@ -811,15 +971,101 @@ class SipSession:
         """Window D audio awaiting the off-path fixture correlation."""
         return self._echo_snapshot if self.outcome is None else None
 
-    def apply_echo_verdict(self, match: object | None, now_ns: int) -> None:
+    def apply_echo_verdict(
+        self,
+        match: object | None,
+        now_ns: int,
+        *,
+        correlation_score: float | None = None,
+    ) -> None:
         if self.outcome is not None or self._echo_snapshot is None:
             return
         self._echo_snapshot = None
+        if self.config.mode != "no-stimulus" and not self._delivery_confirmed:
+            self._pending_echo_verdict = (match, correlation_score, now_ns)
+            return
+        self._complete_echo_verdict(match, correlation_score, now_ns)
+
+    def _complete_echo_verdict(
+        self, match: object | None, correlation_score: float | None, now_ns: int
+    ) -> None:
+        if self.config.mode == "no-stimulus":
+            self.control_fixture_correlation = correlation_score
+            self.outcome = "control_no_stimulus_complete_pending_review"
+            self._event(
+                "control_no_stimulus_completed",
+                now_ns,
+                post_stop_active_frames=self.control_post_stop_active_frames,
+                fixture_correlation=correlation_score,
+                threshold_match=match is not None,
+            )
+            return
+        if self.config.mode == "echo-control":
+            self.control_fixture_correlation = correlation_score
+            self.outcome = "control_echo_complete_pending_review"
+            self._event(
+                "control_echo_completed",
+                now_ns,
+                fixture_correlation=correlation_score,
+                threshold_match=match is not None,
+            )
+            return
         if match is not None:
             self._fail("post_stimulus_echo_detected", now_ns)
             return
         self.outcome = "capture_complete_pending_review"
         self._event("capture_completed", now_ns)
+
+    def _prepare_no_stimulus_snapshot(self, now_ns: int) -> None:
+        if (
+            self._greeting_stop_sample_16k is None
+            or self._echo_snapshot is not None
+            or self._pending_echo_verdict is not None
+        ):
+            return
+        anchor_byte = self._greeting_stop_sample_16k * 2
+        if len(self._rx_16k) - anchor_byte < len(self.config.fixture.pcm16):
+            return
+        anchor_host = self.greeting_stop_ns or now_ns
+        end_host = self._rx_frame_rms[self._scan_index - 1][0]
+        if not self._interval_clear(anchor_host, end_host):
+            self._fail("rx_timeline_discontinuity", now_ns)
+            return
+        self._echo_snapshot = bytes(self._rx_16k[anchor_byte:])
+
+    def _prepare_echo_control_snapshot(self, now_ns: int) -> None:
+        """Capture the bounded post-emission span while the agent is silent."""
+        if (
+            self.emission_boundary_ns is None
+            or self._echo_snapshot is not None
+            or self._pending_echo_verdict is not None
+            or self.outcome is not None
+        ):
+            return
+        try:
+            anchor_index = next(
+                index
+                for index, (_, host_ns) in enumerate(self._rx_frames)
+                if host_ns >= self.emission_boundary_ns
+            )
+        except StopIteration:
+            return
+        anchor_host = self._rx_frames[anchor_index][1]
+        search_bytes = (
+            self.config.echo_search_ms * (ANALYSIS_SAMPLE_RATE // 1_000) * 2
+        )
+        anchor_byte = anchor_index * 640
+        required_end = anchor_byte + len(self.config.fixture.pcm16) + search_bytes
+        if len(self._rx_16k) < required_end:
+            return
+        end_frame = min(required_end // 640, len(self._rx_frame_rms) - 1)
+        end_host = self._rx_frame_rms[end_frame][0]
+        if self._scan_watermark_ns is not None and end_host >= self._scan_watermark_ns:
+            return
+        if not self._interval_clear(anchor_host, end_host):
+            self._fail("rx_timeline_discontinuity", now_ns)
+            return
+        self._echo_snapshot = bytes(self._rx_16k[anchor_byte:required_end])
 
     def _evaluate_separating_silence(self, now_ns: int) -> None:
         """Find the first contiguous 100 ms of rx silence after the fixture.
@@ -922,6 +1168,16 @@ class SipSession:
             ).stdout
         )
         emitted = self.config.emitted
+        successful = self.outcome in _SUCCESS_OUTCOMES
+        gate_outcome = (
+            "CAPTURE_COMPLETE_PENDING_REVIEW"
+            if self.outcome == "capture_complete_pending_review"
+            else (
+                "CONTROL_CAPTURE_COMPLETE_PENDING_REVIEW"
+                if successful
+                else "NO-GO"
+            )
+        )
         manifest: dict[str, object] = {
             "schema_version": 1,
             "harness": "sip_media_endpoint",
@@ -929,24 +1185,18 @@ class SipSession:
             "git_commit": commit,
             "dirty_tree": dirty,
             "created_utc": datetime.now(UTC).isoformat(),
-            "gate_outcome": (
-                "CAPTURE_COMPLETE_PENDING_REVIEW"
-                if self.outcome == "capture_complete_pending_review"
-                else "NO-GO"
-            ),
-            "failure_category": (
-                None
-                if self.outcome == "capture_complete_pending_review"
-                else self.outcome
-            ),
-            "terminal_outcome": (
-                "capture_complete_pending_review"
-                if self.outcome == "capture_complete_pending_review"
-                else "capture_failed"
-            ),
-            "attempt_number": 1,
+            "gate_outcome": gate_outcome,
+            "failure_category": None if successful else self.outcome,
+            "terminal_outcome": self.outcome or "capture_failed",
+            "capture_mode": self.config.mode,
+            "attempt_number": self.config.attempt_number,
             "teardown_result": self.teardown_result,
             "fixture_sha256": self.config.fixture.sha256,
+            "fixture_onset": {
+                "first_active_sample_16k": self.config.fixture.first_active_sample,
+                "method": self.config.fixture.onset_method,
+                "threshold": self.config.fixture.onset_threshold,
+            },
             "emitted_fixture_sha256": emitted.sha256,
             "emitted_fixture_onset": {
                 "first_active_sample_8k": emitted.first_active_sample,
@@ -965,6 +1215,12 @@ class SipSession:
                 "normalization": "g711_ulaw_zero_order_hold",
             },
             "target_legs": None,
+            "capture_limits": {
+                "hard_call_cap_s": self.config.call_cap_ns // 1_000_000_000,
+                "maximum_recorded_samples_8k": MAX_RECORDED_SAMPLES_8K,
+                "maximum_rx_void_events": MAX_RX_VOID_EVENTS,
+                "maximum_rx_void_ms": MAX_RX_VOID_TOTAL_NS // 1_000_000,
+            },
             "detector_candidate": {
                 "activity_threshold_dbfs": (
                     self.config.detector.activity_threshold_dbfs
@@ -985,6 +1241,7 @@ class SipSession:
                 else self.tx_pull_min_interval_ns / 1_000_000
             ),
             "rtp_rx_counters": dict(self.rx_counters),
+            "rtp_identity_source": "synthetic_media_port_sequence",
             "rx_void_events": len(self._rx_voids),
             "rx_void_total_ms": self.rx_void_total_ns // 1_000_000,
             "rx_void_bounds": {
@@ -1003,8 +1260,31 @@ class SipSession:
                 for start, end in self._rx_voids
             ],
             "tx_delivery_counters": self.delivery_counters,
+            "tx_delivery_evidence": {
+                "required": self.config.mode in {"measurement", "echo-control"},
+                "confirmed": self._delivery_confirmed,
+                "required_packets": len(emitted.pcmu_frames),
+                "required_bytes": len(emitted.pcmu_frames) * PCMU_FRAME_BYTES,
+                "baseline": self._delivery_baseline,
+                "baseline_observed_host_ns": self._delivery_baseline_observed_ns,
+                "end": self._delivery_end,
+                "end_observed_host_ns": self._delivery_end_observed_ns,
+                "delta": self._delivery_delta,
+            },
+            "control_evidence": (
+                {
+                    "post_stop_active_frames": self.control_post_stop_active_frames,
+                    "fixture_correlation": self.control_fixture_correlation,
+                    "observation_ms": self.config.control_observation_ns
+                    // 1_000_000,
+                }
+                if self.config.mode != "measurement"
+                else None
+            ),
             "emission_boundary_tx_sample_8k": self.emission_boundary_tx_sample,
             "clock": "time.monotonic_ns",
+            "clock_process_id": os.getpid(),
+            "mapping_error_budget_ms": 80,
         }
         if extra:
             manifest.update(extra)
@@ -1106,6 +1386,17 @@ def main() -> None:
         "--live", action="store_true", help="allow one bounded live attempt"
     )
     parser.add_argument("--fixture", type=_Path)
+    parser.add_argument(
+        "--mode",
+        choices=("measurement", "no-stimulus", "echo-control", "agent-only"),
+        default="measurement",
+    )
+    parser.add_argument("--attempt-number", type=int, default=1)
+    parser.add_argument("--bind-address", default="0.0.0.0")
+    parser.add_argument("--signaling-port", type=int, default=50_620)
+    parser.add_argument("--signaling-port-range", type=int, default=10)
+    parser.add_argument("--media-port", type=int, default=40_000)
+    parser.add_argument("--media-port-range", type=int, default=100)
     arguments = parser.parse_args()
     if not arguments.live:
         print("offline safety gate: no call placed; run the offline test suite")
@@ -1114,6 +1405,21 @@ def main() -> None:
         raise SystemExit("live gate closed: BENCH_LIVE=1 is also required")
     if arguments.fixture is None:
         raise SystemExit("--fixture is required for live mode")
+    if arguments.attempt_number <= 0:
+        raise SystemExit("--attempt-number must be positive")
+    for name in (
+        "signaling_port",
+        "signaling_port_range",
+        "media_port",
+        "media_port_range",
+    ):
+        value = int(getattr(arguments, name))
+        if value <= 0 or value > 65_535:
+            raise SystemExit(f"--{name.replace('_', '-')} is outside 1..65535")
+    if arguments.signaling_port + arguments.signaling_port_range > 65_536:
+        raise SystemExit("signaling port range exceeds 65535")
+    if arguments.media_port + arguments.media_port_range > 65_536:
+        raise SystemExit("media port range exceeds 65535")
     required = {
         name: os.environ.get(name, "")
         for name in (
@@ -1138,12 +1444,18 @@ def main() -> None:
     write_emitted_fixture_wav(emitted, artifacts.path / "emitted_fixture_8k.wav")
     print(
         "live configuration accepted: one attempt, 60-second hard cap, "
+        f"mode={arguments.mode}, "
         f"fixture_sha256={fixture.sha256}, emitted_sha256={emitted.sha256}"
     )
     from bench.sip_media_pjsua import run_live_call
 
     session = SipSession(
-        SipSessionConfig(fixture=fixture, emitted=emitted),
+        SipSessionConfig(
+            fixture=fixture,
+            emitted=emitted,
+            mode=arguments.mode,
+            attempt_number=arguments.attempt_number,
+        ),
         artifacts,
         dial_requested_ns=time.monotonic_ns(),
     )
@@ -1154,6 +1466,11 @@ def main() -> None:
         sip_domain=required["BENCH_SIP_DOMAIN"],
         caller_id=required["BENCH_SIP_CALLER_ID"],
         agent_number=required["BENCH_AGENT_NUMBER"],
+        bind_address=arguments.bind_address,
+        signaling_port=arguments.signaling_port,
+        signaling_port_range=arguments.signaling_port_range,
+        media_port=arguments.media_port,
+        media_port_range=arguments.media_port_range,
     )
     print(
         "terminal outcome: "

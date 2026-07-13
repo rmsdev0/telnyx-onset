@@ -1,11 +1,14 @@
 # SIP media-endpoint harness specification
 
-**Status:** revision 3, accompanying `BENCHMARK_PLAN.md` Amendment 1
+**Status:** revision 4, accompanying `BENCHMARK_PLAN.md` Amendment 1
 (2026-07-12) and its loss-void addendum (2026-07-13). Revision 2
 incorporated all twenty-eight findings of the first independent methodology
 review; revision 3 incorporates the addendum and all eighteen findings of
-the addendum's three-lens review. Implemented in `bench/sip_harness.py` and
-`bench/sip_media_pjsua.py`; live SIP attempts 1–4 are recorded in
+the addendum's three-lens review. Revision 4 adds enforced fixture-interval
+delivery deltas, explicit calibration modes, bounded transport binding,
+renegotiation observation, unsolicited-call rejection, and the complete
+manifest fields found missing by the 2026-07-13 completion audit. Implemented
+in `bench/sip_harness.py` and `bench/sip_media_pjsua.py`; live SIP attempts 1–5 are recorded in
 `bench/PHASE2_REPORT.md`. Nothing in this document weakens a frozen detector
 threshold or window definition; every disclosed rule change is listed in
 Amendment 1's "What changes" or the addendum.
@@ -54,6 +57,8 @@ provider stream topology from the measurement path.
   immediately without processing. The SIP transport and RTP sockets bind to
   a declared local interface with a bounded, documented port range, and RTP
   is source-filtered to the negotiated peer where the stack supports it.
+  The reference adapter uses fixed configurable signaling and RTP port ranges
+  and PJSIP's negotiated-media transport; the manifest records the ranges.
 - **Routing verification (preflight item).** A credentials-connection call
   to `BENCH_AGENT_NUMBER` may route on-net; the first bounded attempt must
   confirm it reaches the agent's Call Control application through the same
@@ -83,6 +88,10 @@ provider stream topology from the measurement path.
   timestamp, host receive monotonic time, RMS dBFS, peak, clipping count,
   and sample offset. The sample-index-to-monotonic mapping is defined by RTP
   timestamps anchored at the first received frame — never by arrival order.
+  The current pjsua2 media-port surface does not expose wire RTP identities;
+  its port sequence/timestamp fields are explicitly labeled synthetic in the
+  manifest. Locally computed stream loss and jitter-buffer statistics remain
+  the live transport evidence and must not be relabeled as wire sequence audit.
 - Loss handling (Amendment 1 addendum revision 2; supersedes the first
   review's any-in-window-loss rule, quoted and dispositioned in the
   addendum): loss is detected from the stack's locally computed per-packet
@@ -180,8 +189,11 @@ it fails closed as `rx_timeline_discontinuity`.
 4. **Window C.** The derived fixture is spliced into tx at the next frame
    boundary; the emission boundary is recorded; tx returns to silence after
    the final fixture frame. Delivery confirmation: SIP-stack transmit
-   statistics and RTCP SR/RR counters covering the fixture interval are
-   recorded in the manifest, and unaccounted transmit octets/packets fail
+   cumulative stack transmit counters are snapshotted immediately before the
+   emission callback and after fixture completion. The deltas, source
+   snapshots, and observation times are recorded; fewer packets or octets than
+   the complete fixture requires, a counter reset, or no covering observation
+   within 2 seconds fails
    closed as `stimulus_send_failed` (the trial is ineligible, preserving the
    plan's eligibility-independent-of-outcome rule). Then ≥ 100 ms separating
    silence on both channels; rx activity overlapping fixture transmission →
@@ -199,6 +211,26 @@ it fails closed as `rx_timeline_discontinuity`.
    dialog-terminating error in any state maps to `call_hangup` unless a more
    specific category already fired; `teardown_result` distinguishes
    `remote_bye` from harness-initiated hangup success/failure.
+
+### Calibration capture modes
+
+The same CLI and adapter expose three non-measurement modes. Each retains the
+hard cap, exact format checks, loss watermark, transport evidence, teardown,
+and ignored artifacts, but finishes with
+`CONTROL_CAPTURE_COMPLETE_PENDING_REVIEW` rather than a measurement result:
+
+- `no-stimulus`: never arms the fixture; records ten seconds after the natural
+  greeting stop and computes the bounded fixture-envelope score on that span.
+- `echo-control`: emits the fixture after the greeting stop and judges the
+  fixture-plus-4-second returned span before the normal agent response window;
+  delivery confirmation is mandatory and any returned activity/correlation is
+  evidence rather than an automatic measurement success.
+- `agent-only`: never emits the fixture and finishes after the greeting's
+  natural end plus the detector hold, preserving the uninterrupted utterance
+  and trailing silence for human labels.
+
+Control outcomes never create `GO` and are never pooled with measurement or
+comparative trials.
 
 ### Process-independent call bounds
 
@@ -318,6 +350,11 @@ manual reviewer's concealment overlay), `tx_delivery_counters` (stack TX
 and RTCP, including the RTT estimate), `session_backstops`,
 `pjsua2_version`, `os_version`, `sip_transport` (`tls`). Every rx
 frame-metadata row carries `rx_sample_offset_16k`.
+
+Revision 4 additionally requires `capture_mode`, `fixture_onset`,
+`capture_limits`, `clock_process_id`, `rtp_identity_source`,
+`mapping_error_budget_ms`, `transport_binding`, and structured
+`tx_delivery_evidence` containing the covering baseline/end/delta.
 
 ## 12. Offline validation strategy
 

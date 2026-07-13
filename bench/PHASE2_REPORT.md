@@ -4,30 +4,25 @@
 
 **NO-GO**
 
-The offline remediation is implemented and tested. The original three attempts
-could not expose two tracks on one socket. A separately authorized fourth call
-exposed and corrected a transient dynamic-end handling error. A fifth corrected
-call captured both channels for the hard call duration but never completed
-greeting-track selection. A sixth diagnostic run reached greeting selection and
-fixture transmission, but proved that pre-greeting setup audio had been selected
-before the actual VoiceAgent greeting completed. A seventh causal-gated run then
-proved that neither inbound-only leg stream carries a valid returned greeting.
-An eighth run proved that `both_tracks` does not return WebSocket-injected audio
-on the agent socket's provider-outbound track under this topology. It did,
-however, expose causal post-greeting activity on the independently streamed
-probe leg. A ninth cross-leg/`both_tracks` run retained exact diagnostic WAVs
-and showed both inbound legs were quiet after greeting. A tenth run requested
-probe-leg `both_tracks` but received 1,067 inbound and zero outbound frames.
-The subsequent sanitized configuration audit found that the harness number is
-assigned to a separate Call Control application, while the bench had originated
-through the agent application's connection. Correct separate-application
-origination was then tested and produced the same zero-outbound result.
-Bidirectional WebSocket capture is exhausted. A receive-only staged run has now
-proved a returned greeting and natural stop on the joint channel candidate.
-The narrowly scoped harness-served fixture playback required for the full
-measurement call is implemented offline and awaits its bounded live attempt.
-No fixture match, manual waveform review, detector calibration, or empirical GO
-was produced. Phase 3 remains blocked.
+The original Call Control streaming topology was exhausted after twenty-six
+bounded calls. The amended external SIP endpoint then produced five diagnostic
+calls. SIP attempt 5 (`p2-96ddebf9e4d6eb36`, revision `1056e28`) was the first
+to reach `CAPTURE_COMPLETE_PENDING_REVIEW`; its waveform review was manually
+agreed and its one bounded loss interval was correctly voided. A later
+independent completion audit found that the adapter had not enforced the
+specification's fixture-interval transmit-delivery gate: it recorded only a
+final counter snapshot, so the tx WAV proved stack handoff but not wire
+delivery. The same audit corrected the archived review's void accounting and
+response-onset label and found the governing SIP amendment still marked draft.
+
+Amendment 1 revision 3 and SIP spec revision 4 now define the corrected path:
+enforced delivery deltas, explicit no-stimulus/echo/agent-only controls,
+bounded transport binding, complete manifests, and reproducible review tools.
+Attempts 1–5 remain valuable diagnostic evidence but are not promotion runs.
+Phase 2 now requires the three calibration captures, bounded detector
+evaluation, a corrected full capture and manual review, and independent final
+evidence review. `measurement_profile.json` remains absent and Phase 3 remains
+blocked.
 
 ## Repository and scope
 
@@ -828,9 +823,11 @@ comparative results, or measurement profile were produced.
 - [x] One authorized monitor-coverage attempt retained.
 - [x] One authorized keeper-format attempt retained.
 - [x] One authorized caller-line keepalive attempt retained.
-- [x] Manual waveform agreement (SIP attempt 5, recorded 2026-07-13).
+- [x] Diagnostic manual waveform agreement (SIP attempt 5, recorded 2026-07-13).
 - [ ] Completed bounded calibration.
-- [ ] Stable two-track live capture and separation.
+- [ ] Corrected SIP capture with isolated rx/tx reference and enforced delivery.
+- [ ] Manual waveform agreement on the corrected full capture.
+- [ ] Independent review of corrected live and calibration evidence.
 - [x] Independent sanitized-evidence review confirms empirical NO-GO.
 
 Phase 3 must not begin while any item remains unchecked. A live failure is
@@ -909,28 +906,31 @@ sample bounds, boundary insets, detector window summaries, fixture-envelope
 correlations, and the captured audio) and recorded **agreement** on every
 item of the review procedure, including the void-aware additions below:
 
-- Greeting appears only in Window A on rx (129 active frames, peak
-  −7.6 dBFS) and ends in a genuine natural stop; the backdated boundary
-  sits at the silence onset.
+- Greeting appears only in Window A on rx (125 active non-void frames, 10
+  voided frames, peak −7.6 dBFS) and ends in a genuine natural stop; the
+  backdated boundary sits at the silence onset.
 - tx is silent except the fixture in Window C; the transmitted audio's
   envelope correlation against the canonical fixture is 0.998.
 - Window C contains zero active rx frames (no overlap, no observed echo of
   the transmission), followed by the ≥100 ms separating silence.
-- The Window D response begins 7.65 s after the boundary and correlates
-  0.80 against the fixture envelope — below the 0.85 threshold and
-  indistinguishable from the greeting's different-speech baseline of 0.784,
-  corroborating the not-an-echo judgment by ear as well as by number.
+- The Window D sustained-activity run begins 7.44 s after the boundary; its
+  confirmation event was processed at 7.65 s. The bounded response correlation
+  is 0.80 against the fixture envelope, below the provisional 0.85 threshold;
+  the greeting's different-speech reference is 0.784. These values are
+  descriptive, not a statistical indistinguishability claim, and the echo
+  control must calibrate their interpretation.
 - The single 191 ms void sits mid-greeting, ends 1.12 s before the stop
   hold begins, and touches no certified interval; manifest void accounting
   matches the event log and sits within the declared bounds.
 - Transport telemetry: zero tx pull lateness, zero RTP anomalies beyond
   the one voided loss (1 of 1,244 packets), RTT ≈ 80 ms.
 
-The review rendering, its extracted data, and its generators are preserved
+The review rendering, its extracted data, and its portable generators are preserved
 in the run directory under `review/` (local, ignored). Per the promotion
 rules this agreement does not create a GO: the Section 7 calibration
 captures, bounded detector calibration, and the independent evidence review
-remain.
+remain. Attempt 5 predates the enforced transmit-counter delta and is therefore
+diagnostic rather than the corrected full capture required for promotion.
 
 ### Void-aware additions to the manual review procedure
 

@@ -10,7 +10,12 @@ remaining Phase 2 promotion gate below passes and
 - SIP attempt 5 (`p2-96ddebf9e4d6eb36`, revision `1056e28`) produced the
   first `CAPTURE_COMPLETE_PENDING_REVIEW`.
 - Manual waveform agreement: **recorded** (PHASE2_REPORT, 2026-07-13),
-  including the void-aware checks.
+  including the void-aware checks. A completion audit corrected the review to
+  125 active non-void Window-A frames plus 10 voided frames and a 7.44 s
+  sustained Window-D onset. Attempt 5 remains diagnostic because its revision
+  did not enforce fixture-interval transmit-counter deltas.
+- Amendment 1 revision 3 / SIP spec revision 4: in force for calibration
+  captures, with delivery enforcement and explicit control modes implemented.
 - `bench/measurement_profile.json`: absent by design, and must remain so
   until the gates below pass.
 
@@ -35,10 +40,10 @@ artifacts stay local and ignored.
    utterance end-to-end. Purpose: the natural-end reference and
    natural-pause segments for detector calibration labels.
 
-Implementation note: the harness needs a small `--mode` switch
-(no-stimulus / echo-control / agent-only) that disables fixture arming or
-the response window as appropriate; each mode is a bench-only control-loop
-variant with its own named terminal outcome, never a measurement run.
+Implementation status: the harness exposes `--mode no-stimulus`,
+`--mode echo-control`, and `--mode agent-only`. Each is a bench-only,
+fail-closed control-loop variant with a named pending-review outcome, never a
+measurement run. Echo control retains mandatory fixture-delivery deltas.
 
 ### 2. Bounded detector calibration (plan §7)
 
@@ -55,7 +60,8 @@ nothing automatically.
 An independent review of: the attempt-5 sanitized evidence and manual
 agreement, the calibration capture results, the chosen detector candidate,
 and the loss-void machinery's behavior across attempts 4–5. Only after its
-sign-off is `measurement_profile.json` created and frozen (with the
+sign-off, and after a corrected full capture with enforced delivery and manual
+waveform agreement, is `measurement_profile.json` created and frozen (with the
 detector candidate, capture topology identifiers, fixture hashes, and the
 addendum's bounds), and Phase 2 closes as empirically GO-capable.
 

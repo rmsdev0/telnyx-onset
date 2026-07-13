@@ -1536,31 +1536,18 @@ def match_fixture_reference(
     minimum_correlation: float = MIN_FIXTURE_CORRELATION,
 ) -> FixtureMatch | None:
     """Match unchanged 16 kHz PCM using a bounded 20 ms energy envelope search."""
-    fixture_envelope = _energy_envelope(fixture.pcm16)
-    candidate_envelope = _energy_envelope(candidate)
-    if not fixture_envelope or len(candidate_envelope) < len(fixture_envelope):
-        return None
-    max_alignment = min(
-        maximum_alignment_ms // FRAME_MS,
-        len(candidate_envelope) - len(fixture_envelope),
+    scored = fixture_envelope_correlation_scores(
+        candidate, fixture, maximum_alignment_ms=maximum_alignment_ms
     )
-    scored = [
-        (
-            _cosine_similarity(
-                candidate_envelope[offset : offset + len(fixture_envelope)],
-                fixture_envelope,
-            ),
-            offset,
-        )
-        for offset in range(max_alignment + 1)
-    ]
+    if not scored:
+        return None
     score, offset = max(scored)
     if score < minimum_correlation:
         return None
     frame_bytes = fixture.frame_bytes
     return FixtureMatch(
         start_byte=offset * frame_bytes,
-        end_byte=(offset + len(fixture_envelope)) * frame_bytes,
+        end_byte=(offset + len(_energy_envelope(fixture.pcm16))) * frame_bytes,
         alignment_frames=offset,
         energy_envelope_correlation=score,
         ambiguous_alignment=sum(
@@ -1570,6 +1557,46 @@ def match_fixture_reference(
         )
         > 1,
     )
+
+
+def fixture_envelope_correlation_scores(
+    candidate: bytes,
+    fixture: Fixture,
+    *,
+    maximum_alignment_ms: int = FIXTURE_ALIGNMENT_SEARCH_MS,
+) -> tuple[tuple[float, int], ...]:
+    """Return every score in the declared bounded alignment search."""
+    fixture_envelope = _energy_envelope(fixture.pcm16)
+    candidate_envelope = _energy_envelope(candidate)
+    if not fixture_envelope or len(candidate_envelope) < len(fixture_envelope):
+        return ()
+    max_alignment = min(
+        maximum_alignment_ms // FRAME_MS,
+        len(candidate_envelope) - len(fixture_envelope),
+    )
+    return tuple(
+        (
+            _cosine_similarity(
+                candidate_envelope[offset : offset + len(fixture_envelope)],
+                fixture_envelope,
+            ),
+            offset,
+        )
+        for offset in range(max_alignment + 1)
+    )
+
+
+def best_fixture_envelope_correlation(
+    candidate: bytes,
+    fixture: Fixture,
+    *,
+    maximum_alignment_ms: int = FIXTURE_ALIGNMENT_SEARCH_MS,
+) -> float | None:
+    """Return the best bounded envelope score, including sub-threshold scores."""
+    scored = fixture_envelope_correlation_scores(
+        candidate, fixture, maximum_alignment_ms=maximum_alignment_ms
+    )
+    return None if not scored else max(scored)[0]
 
 
 @dataclass(frozen=True, slots=True)

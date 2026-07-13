@@ -173,6 +173,12 @@ values and calibration evidence are recorded with the amendment/review history.
 | Loopback and signal contamination | Run stimulus-only, agent-only, and no-stimulus calibration captures. Demonstrate that cross-feed cannot satisfy the frozen stop or speech-bearing criteria. | Failure is a feasibility failure; do not tune using final condition results |
 | Natural-end reference | Use a deterministic agent-audio fixture and uninterrupted baseline captures to establish the scripted natural end. | Freeze the fixture and hash before qualification |
 
+The finite Phase 2 detector grid is declared before the calibration calls:
+RMS dBFS only; 20 ms windows; activity thresholds −42, −40, −38, and
+−36 dBFS; silence thresholds −50, −48, −45, and −42 dBFS; and sustained
+silence holds from 100 through 1000 ms in 100 ms steps. Invalid threshold
+orders remain recorded failures. This declaration does not select a candidate.
+
 Qualification may validate that frozen detector settings behave as expected. If
 they do not, qualification is discarded, calibration is repeated without
 examining between-condition effects, and all affected qualification trials are
@@ -560,15 +566,18 @@ new decision about whether runtime benchmark work should continue.
 
 ### Amendment 1 — 2026-07-12: external SIP media-endpoint harness
 
-**Status:** revision 2, drafted; NOT in force until it passes a final
-methodology review. A first independent methodology review (five adversarial
-lenses: plan consistency, measurement validity, evidence audit,
-security/operations, implementability) was completed 2026-07-12 and returned
-twenty-eight findings; all are incorporated in this revision and in
-`bench/SIP_HARNESS_SPEC.md` revision 2. No qualification or final comparative
-data have been collected under any capture path, so no captured data are
-invalidated; the Phase 2 live-attempt record is retained as evidence and is
-never pooled with measurement data.
+**Status:** revision 3, in force for Phase 2 calibration captures as of
+2026-07-13. The first independent methodology review (five adversarial lenses:
+plan consistency, measurement validity, evidence audit, security/operations,
+implementability) returned twenty-eight findings. A later independent
+repository-and-evidence audit found that the SIP adapter still recorded only a
+final transmit-counter snapshot, did not enforce the required delivery gate,
+left several adapter controls unwired, and allowed ignored review generators to
+break live preflight. Revision 3 incorporates those corrections and the
+explicit calibration modes. SIP attempts 1–5 predate this completion and remain
+diagnostic feasibility evidence; a corrected full capture is required before
+promotion. No qualification or comparative results are invalidated because
+none exist.
 
 **What failed.** The Phase 2 hard gate — one common harness that emits the
 stimulus, captures returned agent audio, and timestamps both on one monotonic
@@ -625,7 +634,7 @@ this dated amendment and another methodology review.
    the harness, which corresponds to the fixture by construction rather than
    by correlation. Consequently the returned-fixture correlation gate is
    replaced by an explicit transmit-delivery confirmation gate
-   (`stimulus_delivery_failed` on unaccounted transmit counters), and the
+   (`stimulus_send_failed` on unaccounted transmit counters), and the
    categories `track_ambiguous`, `fixture_match_missing`,
    `fixture_match_ambiguous`, and `cross_channel_alignment_failed` are
    retired as structurally unreachable. The specification enumerates the
@@ -677,14 +686,14 @@ agreement, bounded calibration, independent review) and the prohibition on
 creating `bench/measurement_profile.json` before a manually confirmed,
 independently reviewed live GO.
 
-**Review requirements before any live use.** (1) Final methodology review of
-this revision and the specification; (2) offline validation of the harness
-control loop and analysis reuse to the existing suite's standards, including
-the specification's required adversarial cases; (3) the Section 7
-calibration captures under the SIP topology (no-stimulus, stimulus-echo,
-agent-only) before any detector freeze; (4) a separately authorized bounded
-live attempt under the same teardown-and-evidence discipline as attempts
-1–26.
+**Review requirements before promotion use.** (1) Offline validation of the
+harness control loop and analysis reuse, including missing/reset delivery
+counters and all control modes; (2) the Section 7 calibration captures under
+the SIP topology (no-stimulus, stimulus-echo, agent-only) before any detector
+freeze; (3) a corrected bounded full capture with fixture-interval delivery
+deltas; and (4) manual and independent evidence review. The callback-to-wire
+timestamp qualification remains a qualification-stage requirement before
+final collection, not a reason to treat a callback handoff as wire evidence.
 
 ### Amendment 1 addendum — 2026-07-13: bounded, recorded loss voids
 
