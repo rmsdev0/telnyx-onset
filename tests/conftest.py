@@ -20,7 +20,13 @@ import pytest
 from onset.agent import VoiceAgent
 from onset.prompts import RESTAURANT_CONFIG
 from onset.settings import Settings
-from onset.types import LLMEvent, LLMEventType, LLMMessage, ToolCallRequest
+from onset.types import (
+    LLMEvent,
+    LLMEventType,
+    LLMMessage,
+    MediaFlushResult,
+    ToolCallRequest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterable
@@ -77,10 +83,21 @@ class FakeMedia:
         if self._auto and self.agent is not None and name.startswith("speak:"):
             self.agent.submit_speak_ended(int(name.split(":", 1)[1]))
 
-    async def flush(self) -> None:
+    async def flush(self) -> MediaFlushResult:
         # Mirror the real flush: bump the epoch so in-flight frames are dropped.
+        old_epoch = self._epoch
         self._epoch += 1
         self.clears += 1
+        now = asyncio.get_running_loop().time()
+        timestamp = int(now * 1_000_000_000)
+        return MediaFlushResult(
+            old_epoch=old_epoch,
+            new_epoch=self._epoch,
+            invalidated_ns=timestamp,
+            send_started_ns=timestamp,
+            send_finished_ns=timestamp,
+            outcome="completed",
+        )
 
     async def aclose(self) -> None:
         self.closed = True

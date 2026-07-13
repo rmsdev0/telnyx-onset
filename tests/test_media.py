@@ -224,3 +224,15 @@ async def test_pacer_failure_fires_on_error() -> None:
     assert errors == [1]
     assert media._closed
     await media.aclose()
+
+
+@pytest.mark.asyncio
+async def test_flush_failure_is_returned_with_epoch_invalidation() -> None:
+    media = MediaStream(_FailingWS(), frame_ms=1, lead_frames=10)
+    old_epoch = media.begin_utterance()
+    result = await media.flush()
+    assert result.old_epoch == old_epoch
+    assert result.new_epoch == old_epoch + 1
+    assert result.outcome == "failed"
+    assert result.error_category == "ConnectionError"
+    assert result.invalidated_ns <= result.send_started_ns <= result.send_finished_ns

@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from onset.types import BenchmarkMode
 
 
 class Settings(BaseSettings):
@@ -100,6 +103,15 @@ class Settings(BaseSettings):
     half_duplex: bool = True
     listen_guard_ms: int = 300
 
+    # Benchmark-only trigger policy and milestone capture. ``production`` keeps
+    # the legacy behavior (VAD or transcript in full duplex; suppression in half
+    # duplex). Strict modes are configuration-validated so a mislabeled trial
+    # fails before the server accepts a call.
+    benchmark_mode: BenchmarkMode = BenchmarkMode.PRODUCTION
+    benchmark_trial_id: str = ""
+    benchmark_events_path: str = ""
+    benchmark_profile_path: str = ""
+
     # Spend and volume protection (0 disables)
     max_concurrent_calls: int = 10
     max_tokens_per_call: int = 0
@@ -125,6 +137,21 @@ class Settings(BaseSettings):
     def frame_bytes(self) -> int:
         """Bytes in one frame of mono PCM16 at sample_rate (640 at 16 kHz/20 ms)."""
         return int(self.sample_rate * self.frame_ms / 1000) * 2
+
+    @model_validator(mode="after")
+    def validate_benchmark_duplex_policy(self) -> Settings:
+        """Reject condition labels that contradict the listening gate."""
+        if self.benchmark_mode in {
+            BenchmarkMode.ONSET_FD_VAD,
+            BenchmarkMode.ONSET_FD_TRANSCRIPT,
+        } and self.half_duplex:
+            raise ValueError(f"{self.benchmark_mode.value} requires half_duplex=false")
+        if (
+            self.benchmark_mode == BenchmarkMode.ONSET_HALF_DUPLEX
+            and not self.half_duplex
+        ):
+            raise ValueError("onset-half-duplex requires half_duplex=true")
+        return self
 
 
 @lru_cache(maxsize=1)

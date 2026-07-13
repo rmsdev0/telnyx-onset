@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from onset.types import LLMEvent, LLMMessage
+    from onset.types import LLMEvent, LLMMessage, MediaFlushResult
 
 
 class CallPort(Protocol):
@@ -39,7 +39,7 @@ class MediaPort(Protocol):
 
     async def send_mark(self, epoch: int, name: str) -> None: ...
 
-    async def flush(self) -> None: ...
+    async def flush(self) -> MediaFlushResult: ...
 
     async def aclose(self) -> None: ...
 

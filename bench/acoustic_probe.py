@@ -77,6 +77,8 @@ from onset.telnyx import Call, verify_webhook
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
+    from onset.types import MediaFlushResult
+
 MAX_WEBHOOK_BYTES = 256 * 1024
 MAX_FIXTURE_BYTES = 1024 * 1024
 MAX_FIXTURE_SECONDS = 10.0
@@ -349,8 +351,8 @@ class GreetingObservedMedia:
     async def send_mark(self, epoch: int, name: str) -> None:
         await self._inner.send_mark(epoch, name)
 
-    async def flush(self) -> None:
-        await self._inner.flush()
+    async def flush(self) -> MediaFlushResult:
+        return await self._inner.flush()
 
     async def aclose(self) -> None:
         await self._inner.aclose()

@@ -12,6 +12,15 @@ import enum
 from dataclasses import dataclass
 
 
+class BenchmarkMode(enum.StrEnum):
+    """Runtime trigger policy for production and declared benchmark conditions."""
+
+    PRODUCTION = "production"
+    ONSET_FD_VAD = "onset-fd-vad"
+    ONSET_FD_TRANSCRIPT = "onset-fd-transcript"
+    ONSET_HALF_DUPLEX = "onset-half-duplex"
+
+
 class STTEventType(enum.Enum):
     TRANSCRIPT_INTERIM = "transcript_interim"
     TRANSCRIPT_FINAL = "transcript_final"
@@ -32,6 +41,19 @@ class STTEvent:
 
     type: STTEventType
     transcript: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MediaFlushResult:
+    """Generation-independent facts captured around one media clear attempt."""
+
+    old_epoch: int
+    new_epoch: int
+    invalidated_ns: int
+    send_started_ns: int
+    send_finished_ns: int
+    outcome: str
+    error_category: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

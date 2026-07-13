@@ -1,8 +1,9 @@
 # Phase 3 preparation
 
-**Status:** ready to begin. Phase 3 has NOT begun. All Phase 2 gates are closed
-and `bench/measurement_profile.json` is frozen under manual and independent
-review.
+**Status:** Phase 3 runtime implementation is underway. All Phase 2 gates are
+closed and `bench/measurement_profile.json` remains frozen under manual and
+independent review. Strict-mode live qualification and final collection have
+not begun.
 
 ## Where Phase 2 stands (2026-07-13)
 
@@ -81,7 +82,22 @@ waveform agreement, is `measurement_profile.json` created and frozen (with the
 detector candidate, capture topology identifiers, fixture hashes, and the
 addendum's bounds), and Phase 2 closes as empirically GO-capable.
 
-## What Phase 3 actually is (scope reminder, not a start)
+## Phase 3 execution status
+
+The runtime now exposes fail-closed `onset-fd-vad` and
+`onset-fd-transcript` modes, generation-scoped interruption/cancellation/clear
+milestones, frozen-profile loading, and sanitized monotonic JSONL records. The
+interrupting transcript is preserved for turn assembly rather than discarded.
+Offline adversarial tests prove that each ineligible source is inert and that
+the caller turn commits once.
+
+`bench.phase3` now prepares write-once, deterministic balanced-block manifests
+for qualification/final runs and applies the plan's overlapping failure
+taxonomy without replacing failed attempts. Formal qualification still
+requires a clean committed revision and separately authorized bounded live
+calls through the common SIP boundary.
+
+## Phase 3 scope
 
 Per plan §4–§5 and §20, Phase 3 is benchmark-ready runtime work:
 
