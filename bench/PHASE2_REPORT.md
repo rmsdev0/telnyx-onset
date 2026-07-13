@@ -837,3 +837,59 @@ Phase 3 must not begin while any item remains unchecked. A live failure is
 `NO-GO`, not permission to weaken the endpoint. `measurement_profile.json` may
 be created only after a genuine, manually confirmed, independently reviewed
 live GO.
+
+## SIP harness live attempts (Amendment 1)
+
+These attempts ran the external SIP media-endpoint harness of
+`BENCHMARK_PLAN.md` Amendment 1 against the unchanged production runtime,
+under the user's explicit per-attempt authorization. Their sequencing ahead
+of Amendment 1's final review sign-off is disclosed in the amendment's
+addendum. Artifacts are local and ignored; none are promotion evidence.
+
+- 2026-07-12, SIP attempt 1 (revision `2e42ee2`, artifact
+  `p2-1b1c880bf35ff346`): **NO-GO — `media_ordering_anomaly`**. First call
+  through the SIP harness: answered with exact PCMU, anchored the greeting,
+  confirmed the natural stop, recorded the emission boundary, completed
+  fixture transmission, and confirmed separating silence — every stage the
+  Call Control surface never reached. Failed closed at 191 ms of tx cadence
+  drift caused by the harness itself: full-history PCM re-analysis and the
+  Window D correlation ran on the media path. The agent transcribed the
+  fixture and responded. pjsua2 teardown aborted the process after
+  artifacts were flushed; the hangup reached the far end late.
+- 2026-07-12, SIP attempt 2 (revision `c5032bf`, artifact
+  `p2-1c0f45efeed1207d`): **NO-GO — `media_ordering_anomaly`**. With
+  analysis moved off the media path, residual per-frame Python overhead
+  (pure-Python G.711, per-row file opens, per-frame SWIG loops) still
+  drifted 295 ms by frame 388, before the greeting anchored. Fixed offline
+  with C-speed conversion paths (equivalence test-pinned), batched metadata
+  flushes, cached tx buffers, and a burst-based pull gate that records
+  lateness as telemetry.
+- 2026-07-12, SIP attempt 3 (revision `f438168`, artifact
+  `p2-25cedeecf3bd1cc7`): **NO-GO — `post_stimulus_response_not_observed`**.
+  The media clock ran perfectly (zero max lateness). Greeting, stop,
+  emission, transmission, and separating silence all confirmed; the agent
+  transcribed the fixture and spoke a genuine response — but the Window D
+  echo gate's length requirement was keyed to the latest activity run,
+  which real speech pauses kept resetting, so the judging window never
+  filled and the hard cap expired. Fixed offline with a sticky
+  first-activity anchor; replaying this attempt's own recorded rx yields
+  `capture_complete_pending_review`.
+- 2026-07-12, SIP attempt 4 (revision `adc1f48`, artifact
+  `p2-962141c3d5d56703`): **NO-GO — `rx_timeline_discontinuity`**. All
+  stages through separating silence confirmed again, with clean tx timing
+  and zero RTP anomalies except the failing event: one lost packet of 521
+  during the response window, fatal under the first review's
+  any-in-window-loss rule. This attempt motivates the bounded loss-void
+  addendum; its artifact is the addendum's cited evidence.
+
+### Void-aware additions to the manual review procedure
+
+For any run captured under the loss-void addendum, the manual waveform
+review additionally requires: (1) overlay every `rx_void_intervals` entry
+(host-time and rx-sample bounds from the manifest) on the rx waveform plot;
+(2) verify each certified boundary's supporting run — Window A anchor
+activity, the natural-stop hold, the separating silence, and the Window D
+echo-judged span — lies entirely in verdicted, non-voided timeline;
+(3) verify the manifest's void count and total duration match the
+`rx_loss_interval_voided` events and sit within the declared bounds; and
+(4) record the outcome of these checks in the sanitized agreement note.

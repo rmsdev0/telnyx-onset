@@ -342,6 +342,63 @@ def test_void_bounds_fail_closed(tmp_path: Path) -> None:
     assert session.outcome == "rx_timeline_discontinuity"
 
 
+def test_void_total_duration_bound_fails_closed(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    driver = Driver(session)
+    driver.answer()
+    driver.run(3, QUIET_8K)
+    session.report_rx_loss(1, driver.now_ns, driver.now_ns + 1_100_000_000)
+    assert session.outcome == "rx_timeline_discontinuity"
+
+
+def test_void_between_frame_stamps_poisons_separation(tmp_path: Path) -> None:
+    """A silence hold is an interval: a void between clean frame stamps
+    inside it must still prevent certification."""
+    session = _session(tmp_path)
+    driver = Driver(session)
+    driver.answer()
+    _drive_to_armed(driver)
+    for _ in range(60):
+        if session.fixture_end_ns is not None:
+            break
+        driver.exchange(QUIET_8K)
+    assert session.fixture_end_ns is not None
+    # Void a sliver strictly between upcoming frame stamps within the
+    # separating-silence interval: no frame lands inside it, but the
+    # certified interval would.
+    sliver_start = driver.now_ns + NS_PER_FRAME + 1
+    session.report_rx_loss(1, sliver_start, sliver_start + 2)
+    before = session._separation_confirmed_ns
+    driver.run(6, QUIET_8K)
+    if session._separation_confirmed_ns is not None and before is None:
+        boundary = session._separation_confirmed_ns
+        run_start = boundary - session.config.separating_silence_ns
+        assert not (run_start <= sliver_start <= boundary)
+    driver.run(10, QUIET_8K)
+    assert session._separation_confirmed_ns is not None  # certified later
+
+
+def test_void_inside_echo_span_reanchors_window_d(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    driver = Driver(session)
+    driver.answer()
+    _drive_to_armed(driver)
+    for _ in range(60):
+        if session.fixture_end_ns is not None:
+            break
+        driver.exchange(QUIET_8K)
+    driver.run(8, QUIET_8K)  # separation confirmed
+    driver.run(6, LOUD_8K)  # response begins; candidate anchors
+    assert session._d_candidate_start_window is not None
+    session.report_rx_loss(1, driver.now_ns - NS_PER_FRAME, driver.now_ns)
+    driver.run(30, LOUD_8K)
+    driver.run(400, QUIET_8K)
+    events = (session.artifacts.path / "events.jsonl").read_text()
+    assert '"window_d_reanchored_past_void"' in events
+    # The re-anchored candidate still completes on the clean post-void audio.
+    assert session.outcome == "capture_complete_pending_review"
+
+
 def test_scan_watermark_defers_certification(tmp_path: Path) -> None:
     session = _session(tmp_path)
     driver = Driver(session)

@@ -1,12 +1,14 @@
 # SIP media-endpoint harness specification
 
-**Status:** revision 2, accompanying `BENCHMARK_PLAN.md` Amendment 1
-(2026-07-12). Revision 2 incorporates all twenty-eight findings of the first
-independent methodology review (plan consistency, measurement validity,
-evidence audit, security/operations, implementability). Not implemented;
-pending final methodology review. Nothing in this document weakens a frozen
-detector threshold or window definition; every disclosed rule change is
-listed in Amendment 1's "What changes."
+**Status:** revision 3, accompanying `BENCHMARK_PLAN.md` Amendment 1
+(2026-07-12) and its loss-void addendum (2026-07-13). Revision 2
+incorporated all twenty-eight findings of the first independent methodology
+review; revision 3 incorporates the addendum and all eighteen findings of
+the addendum's three-lens review. Implemented in `bench/sip_harness.py` and
+`bench/sip_media_pjsua.py`; live SIP attempts 1–4 are recorded in
+`bench/PHASE2_REPORT.md`. Nothing in this document weakens a frozen detector
+threshold or window definition; every disclosed rule change is listed in
+Amendment 1's "What changes" or the addendum.
 
 ## 1. Purpose
 
@@ -81,19 +83,27 @@ provider stream topology from the measurement path.
   timestamp, host receive monotonic time, RMS dBFS, peak, clipping count,
   and sample offset. The sample-index-to-monotonic mapping is defined by RTP
   timestamps anchored at the first received frame — never by arrival order.
-- Loss handling (Amendment 1 addendum, 2026-07-13, after live SIP
-  attempt 4): the stack conceals lost packets before the port surface, so
-  loss is detected by polling stream statistics every 100 ms and localized
-  to its poll interval. A lossy interval is **voided**: its windows certify
-  neither activity nor silence, and every certification run (Window A
-  arming, the stop hold, separating silence, Window D activity) resets
-  across it — a boundary can therefore never be certified over concealed
-  audio. Analysis consumes a window only after its interval's loss verdict
-  (the scan watermark), voids are recorded per-event and in the manifest,
-  and the declared bounds — more than 5 loss events or more than 1 s of
-  voided timeline — fail closed as `rx_timeline_discontinuity`. Real RTP
-  sequence/timestamp anomalies surfaced to the session still fail closed
-  once Window A is anchored.
+- Loss handling (Amendment 1 addendum revision 2; supersedes the first
+  review's any-in-window-loss rule, quoted and dispositioned in the
+  addendum): loss is detected from the stack's locally computed per-packet
+  receive loss counter (clamped monotonically; not the ~5 s peer RTCP
+  reports), polled every 100 ms and localized to its poll interval, with
+  the interval end padded by the pinned jitter-buffer depth plus one frame.
+  A lossy interval is **voided**: its windows certify neither activity nor
+  silence; every certification run resets across it; and the natural-stop
+  hold, separating silence, and Window D echo-judged span are checked for
+  void overlap as wall-clock intervals — a poisoned hold restarts after the
+  void and a poisoned echo span re-anchors Window D. Analysis consumes a
+  window only strictly before the scan watermark, which is armed before the
+  INVITE and advances only with each interval's verdict (lagged by the void
+  pad); a watermark frozen beyond 2 s fails closed before deadline
+  categories can misattribute the stall. Stimulus overlap is judged inside
+  the verdicted scan. Voids are recorded per event with host-time and
+  rx-sample bounds; beyond 5 events or 1 s total the run fails closed as
+  `rx_timeline_discontinuity`. Session-surfaced RTP sequence/timestamp
+  anomalies still fail closed once Window A is anchored (port-level
+  identities are synthesized live, so stream stats are the live loss
+  signal).
 - Analysis applies the reviewed G.711 zero-order-hold normalization to form
   the 16 kHz analysis timeline (in force for PCMU capture from attempt 15
   onward; attempts 23 and 25 failed at format gates before media capture).
@@ -222,6 +232,10 @@ recorded alongside — never subtracted from — the headline metric.
   `cross_channel_alignment_failed`, `stream_auth_failed`,
   `stream_call_id_mismatch`, `stimulus_transport_pending`.
 - **New:** `rx_timeline_discontinuity`, `post_stimulus_echo_detected`.
+  Redefined by the 2026-07-13 addendum: `rx_timeline_discontinuity` fires on
+  void bounds exceeded (more than 5 loss events or more than 1 s voided), a
+  scan watermark frozen beyond 2 s, or a post-anchor RTP sequence/timestamp
+  anomaly — bounded, recorded loss voids no longer fire it.
 
 ## 7. Reused components (unchanged)
 
@@ -295,11 +309,15 @@ channel_b: harness_tx_reference}`; `measured_media_format` = PCMU/8 kHz with
 ZOH analysis rate on both channels; `target_legs` = `null` (removal noted).
 
 New required fields: `emitted_fixture_sha256`, `emitted_fixture_onset`,
-`decimation_rule`, `jitter_buffer_ms` (configured and observed),
-`tx_skew_bound_ms`, `timing_error_budget_ms`, `rtp_rx_counters` (loss,
-concealment, duplicates, resizes), `tx_delivery_counters` (stack TX and
-RTCP), `rtt_estimate_ms`, `session_backstops`, `pjsua2_version`,
-`os_version`, `sip_transport` (`tls`).
+`decimation_rule`, `jitter_buffer_ms` (configured), `void_end_pad_ms`,
+`tx_burst_bound_ms`, `tx_pull_max_late_ms`, `tx_pull_min_interval_ms`,
+`rtp_rx_counters` (loss, gaps, regressions, timestamp anomalies),
+`rx_void_events`, `rx_void_total_ms`, `rx_void_bounds`,
+`rx_void_intervals` (per-event host-ns and rx-sample bounds, for the
+manual reviewer's concealment overlay), `tx_delivery_counters` (stack TX
+and RTCP, including the RTT estimate), `session_backstops`,
+`pjsua2_version`, `os_version`, `sip_transport` (`tls`). Every rx
+frame-metadata row carries `rx_sample_offset_16k`.
 
 ## 12. Offline validation strategy
 
@@ -313,7 +331,11 @@ response scenarios; the attempt-6 false-anchor scenario (setup blip before
 the real greeting must not anchor Window A); a deliberately skewed fake
 clock that fails if any cross-channel predicate is evaluated by sample
 index; echo-injection cases that must trigger `post_stimulus_echo_detected`;
-concealment/loss cases that must trigger `rx_timeline_discontinuity`;
+loss cases in both directions of the addendum rule — bounded loss must
+void, reset certification runs, be recorded, and still complete;
+bound-exceeding loss, a stalled watermark, and post-anchor RTP anomalies
+must trigger `rx_timeline_discontinuity`; and a boundary-adjacent void must
+move or delay the boundary rather than be certified across;
 remote-BYE in every stage; teardown on every failure category; inbound-call
 rejection; and artifact sanitization (no SIP material, credentials, or
 numbers). pjsua2 itself is exercised only in the bounded live attempt.

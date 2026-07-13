@@ -688,32 +688,89 @@ live attempt under the same teardown-and-evidence discipline as attempts
 
 ### Amendment 1 addendum — 2026-07-13: bounded, recorded loss voids
 
-**Status:** drafted with the same standing as Amendment 1; pending the same
-final methodology review. Motivating evidence: live SIP attempt 4 passed
-every stage through separating silence — the first attempt in the project to
-do so — and then failed closed when exactly one RTP packet of 521 was lost
-during the response window, under the review-mandated rule that any
-in-window loss is fatal.
+**Status:** revision 2, incorporating all eighteen findings of its own
+three-lens methodology review (measurement validity, plan consistency,
+implementation audit) completed 2026-07-13. As with Amendment 1: no
+qualification or final comparative data exist under any capture path, so no
+captured data are invalidated; live SIP attempt artifacts are retained as
+evidence and are never pooled with measurement data.
 
-**What changes.** In-window packet loss no longer fails a run outright.
-Loss is localized to a 100 ms stream-statistics poll interval, and that
-interval is voided: its windows can certify neither activity nor silence,
-every certification run resets across it, and analysis consumes a window
-only after its interval's loss verdict is known. Silence certifications —
-the natural-stop hold and the separating-silence interval — can therefore
-never span concealed audio; loss near a boundary moves or delays the
-boundary rather than fabricating it. Voids are recorded per event and in
-the manifest. Declared bounds: more than five loss events or more than one
-second of voided timeline in a run remains `rx_timeline_discontinuity`.
+**Process disclosure.** Live SIP attempts 1–4 were placed under the user's
+explicit per-attempt authorization before Amendment 1's final review
+sign-off. Attempts 1–3 exposed and fixed harness implementation defects;
+attempt 4 is this addendum's motivating evidence. Their per-attempt record
+is in `bench/PHASE2_REPORT.md` ("SIP harness live attempts"). This sequencing
+is disclosed as a deviation from Amendment 1's review-before-live-use
+requirement, resolved by this dated record.
+
+**Superseded rule, quoted.** The first methodology review installed, and
+this addendum overrides, the following spec §3 rule: "Loss, concealment,
+duplicate, or jitter-buffer resize events are counted; any such event inside
+Window C, the separating-silence interval, the sustained-silence stop
+region, or Window D fails closed as `rx_timeline_discontinuity`." Motivating
+evidence: live SIP attempt 4 passed every stage through separating silence —
+the first attempt in the project to do so — then failed closed when exactly
+one RTP packet of 521 was lost during the response window. Every other event
+class from the superseded rule keeps a named fail-closed disposition below.
+
+**What changes.** Bounded packet loss no longer fails a run outright:
+
+1. Loss is detected from the stack's locally computed per-packet receive
+   loss counter (not the ~5 s peer RTCP receiver reports), polled every
+   100 ms, and localized to its poll interval. The interval end is padded by
+   the pinned jitter-buffer depth plus one frame, because the counter moves
+   at packet arrival while the concealed audio surfaces about one buffer
+   depth later. The jitter buffer is configured fixed-depth and recorded.
+2. A lossy interval is **voided**: its windows certify neither activity nor
+   silence, every certification run resets across it, and every certified
+   interval — the natural-stop hold, the separating silence, and the Window
+   D echo-judged span — is checked for void overlap as a wall-clock
+   interval, not merely at frame stamps. A poisoned hold restarts after the
+   void; a poisoned echo span re-anchors Window D past it.
+3. Analysis consumes a window only strictly before the scan watermark,
+   which advances only when a poll interval's loss verdict is in (lagged by
+   the void pad). The watermark is armed before the INVITE, so no live
+   window is ever consumed verdict-free. A watermark frozen longer than 2 s
+   fails closed as `rx_timeline_discontinuity` before any deadline category
+   can misattribute a harness stall to agent behavior.
+4. Stimulus overlap is judged inside the verdicted scan, so concealed audio
+   can never indict the agent for talking over the stimulus; it voids
+   instead.
+5. Voids are recorded per event with host-time and rx-sample bounds in the
+   manifest, and every frame-metadata row carries its rx sample offset, so
+   the manual waveform reviewer can overlay exactly which recorded audio is
+   stack concealment.
+
+**Event-class dispositions** (complete coverage of the superseded rule):
+bounded stream-stat loss → voided interval; loss beyond bounds → fail
+closed; RTP sequence/timestamp anomalies surfaced to the session → fail
+closed after Window A anchors (at the port surface these identities are
+synthesized, so the stream-stat path is the live loss signal); loss-counter
+decrements → clamped monotonically; jitter-buffer resize → precluded by the
+pinned fixed-depth configuration, and any observed adaptation is a
+configuration defect (`media_format_mismatch` class), not tolerated media.
+
+**Declared bounds, justified.** More than **5 loss events** or more than
+**1 s of voided timeline** fails closed as `rx_timeline_discontinuity`.
+Basis: (a) the measured prior — attempt 4 saw 1 loss in 521 packets
+(≈0.2%) over ~10 s; at that rate a 60 s call expects ~6 losses, and 5
+events bounds a comparably noisy but usable call while a materially lossier
+transport should fail; (b) delay budget — each void costs at most one
+100 ms localization unit plus its pad plus one restarted hold (≤500 ms), so
+5 voids delay certification by at most ~3.5 s, comfortably inside the 15 s
+greeting horizon and 60 s cap; (c) the 1 s total caps the unknown fraction
+of a ~60 s certified timeline below ~2%. Void widths are recorded
+per-event, so a harness-induced wide interval (a stalled poll) is visible
+as such rather than charged silently to the transport.
 
 **What does not change.** Detector thresholds, hold durations, window
 definitions, the emission boundary, all other fail-closed gates, and the
-prohibition on synthetic silence: voided audio is excluded from
+prohibition on synthetic silence: voided audio is excluded from every
 certification, never substituted, and the recorded WAV keeps the stack's
-own concealment output, declared as such.
+own concealment output, declared per-sample via the manifest's void
+intervals.
 
-**Why this is not retry-until-pass.** The alternative to this addendum was
-re-dialing until a call happened to traverse a lossless path, which the
-plan prohibits. Bounded voids make the measurement valid on realistic
-transport while keeping every boundary certification loss-free by
-construction.
+**Why this is not retry-until-pass.** The alternative was re-dialing until
+a call happened to traverse a lossless path, which the plan prohibits.
+Bounded voids make the measurement valid on realistic transport while
+keeping every boundary certification loss-free by construction.

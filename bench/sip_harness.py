@@ -53,6 +53,9 @@ TX_BURST_BOUND_NS = FRAME_MS * 1_000_000 // 2
 # addendum): beyond either bound the transport is unfit for measurement.
 MAX_RX_VOID_EVENTS = 5
 MAX_RX_VOID_TOTAL_NS = 1_000_000_000
+# A frozen scan watermark means loss verdicts stopped arriving; deadline
+# categories would then misattribute a harness fault to agent behavior.
+WATERMARK_STALL_BOUND_NS = 2_000_000_000
 MAX_RECORDED_SAMPLES_8K = (60 + 10) * SAMPLE_RATE_8K
 DECIMATION_RULE = "hamming63_lowpass3400_group_delay_compensated_decimate2"
 
@@ -386,6 +389,7 @@ class SipSession:
             self._fail("capture_limit_reached", frame.host_receive_monotonic_ns)
             return
         pcm16 = fast_decode_pcmu_8k_to_pcm16_16k(frame.pcmu)
+        sample_offset_16k = len(self._rx_16k) // 2
         self._rx_frames.append((len(self._rx_16k), frame.host_receive_monotonic_ns))
         self._rx_pcmu.extend(frame.pcmu)
         self._rx_16k.extend(pcm16)
@@ -400,13 +404,13 @@ class SipSession:
                 "rtp_sequence": frame.rtp_sequence,
                 "rtp_timestamp": frame.rtp_timestamp,
                 "host_receive_monotonic_ns": frame.host_receive_monotonic_ns,
+                "rx_sample_offset_16k": sample_offset_16k,
                 "rms_dbfs": None if rms == -math.inf else round(rms, 2),
                 "payload_bytes": len(pcm16),
                 "source_payload_bytes": len(frame.pcmu),
             }
         )
         self._rx_frame_count += 1
-        self._check_stimulus_overlap(frame.host_receive_monotonic_ns, rms)
 
     def pull_tx_frame(self, now_ns: int) -> bytes:
         """Media-clock frame request; returns one 160-byte PCMU payload."""
@@ -481,6 +485,17 @@ class SipSession:
             self._flush_metadata()
         if self.outcome is not None:
             return
+        if (
+            self._scan_watermark_ns is not None
+            and self._rx_frames
+            and now_ns - self._scan_watermark_ns > WATERMARK_STALL_BOUND_NS
+        ):
+            # Loss verdicts stopped arriving: without this gate the deadline
+            # categories below would misattribute a harness/stats fault to
+            # agent behavior.
+            self._event("scan_watermark_stalled", now_ns)
+            self._fail("rx_timeline_discontinuity", now_ns)
+            return
         if self.answered_ns is not None and self._rx_frames:
             self._analyze(now_ns)
         if self.outcome is not None:
@@ -538,13 +553,14 @@ class SipSession:
         """Stream-stat loss localized to the last poll interval.
 
         The stack conceals lost packets before the port surface, so the
-        concealed audio lies somewhere in [interval_start_ns, now_ns]. That
+        concealed audio lies somewhere in [interval_start_ns, now_ns] (the
+        adapter pads the end by the pinned jitter-buffer depth). That
         interval is voided: its windows can certify neither activity nor
         silence, and every certification run resets across it. Bounded and
         recorded; beyond the declared bounds the transport is unfit and the
         run fails closed.
         """
-        if packets <= 0:
+        if packets <= 0 or self.outcome is not None:
             return
         self.rx_counters["reported_loss"] = (
             int(self.rx_counters.get("reported_loss", 0)) + packets
@@ -565,6 +581,17 @@ class SipSession:
 
     def _in_void(self, host_ns: int) -> bool:
         return any(start <= host_ns <= end for start, end in self._rx_voids)
+
+    def _interval_clear(self, start_ns: int, end_ns: int) -> bool:
+        """True when no recorded void overlaps [start_ns, end_ns].
+
+        Certification intervals are checked as intervals, not per-frame
+        points: bursty jitter-buffer delivery can stamp frames sparsely, and
+        a void lying between frame stamps must still poison a hold.
+        """
+        return all(
+            end_ns < start or start_ns > end for start, end in self._rx_voids
+        )
 
     # ------------------------------------------------------------ analysis
 
@@ -617,20 +644,6 @@ class SipSession:
                     "rx_timeline_discontinuity", frame.host_receive_monotonic_ns
                 )
 
-    def _check_stimulus_overlap(self, host_ns: int, rms_dbfs: float) -> None:
-        if (
-            self.emission_boundary_ns is None
-            or rms_dbfs < self.config.detector.activity_threshold_dbfs
-            or host_ns < self.emission_boundary_ns
-        ):
-            return
-        # An active rx frame while the fixture is still on the wire
-        # (fixture_end_ns unset) is overlap just as much as one inside the
-        # completed transmission interval. The interval is half-open: a frame
-        # timestamped exactly at fixture_end carries post-transmission audio.
-        if self.fixture_end_ns is None or host_ns < self.fixture_end_ns:
-            self._fail("stimulus_overlap", host_ns)
-
     def _analyze(self, now_ns: int) -> None:
         """Advance the incremental window state machine over new rx frames."""
         detector = self.config.detector
@@ -641,8 +654,10 @@ class SipSession:
             host_ns, rms = self._rx_frame_rms[index]
             if (
                 self._scan_watermark_ns is not None
-                and host_ns > self._scan_watermark_ns
+                and host_ns >= self._scan_watermark_ns
             ):
+                # Strictly before the watermark: a frame stamped exactly at
+                # it belongs to the next, not-yet-verdicted poll interval.
                 break
             self._scan_index += 1
             if self._in_void(host_ns):
@@ -656,6 +671,20 @@ class SipSession:
                 continue
             active = rms >= detector.activity_threshold_dbfs
             silent = rms <= detector.silence_threshold_dbfs
+            # Overlap is judged here, inside the verdicted scan, so a
+            # concealed frame can never indict the agent for talking over
+            # the stimulus (it voids instead).
+            if (
+                active
+                and self.emission_boundary_ns is not None
+                and host_ns >= self.emission_boundary_ns
+                and (
+                    self.fixture_end_ns is None
+                    or host_ns < self.fixture_end_ns
+                )
+            ):
+                self._fail("stimulus_overlap", host_ns)
+                return
             if self.anchor_ns is None:
                 if active:
                     if self._run_start_window is None:
@@ -681,6 +710,18 @@ class SipSession:
                 elif silent:
                     if self._silence_start_window is None:
                         self._silence_start_window = index
+                    if (
+                        index - self._silence_start_window + 1 >= windows_per_hold
+                        and not self._interval_clear(
+                            self._rx_frame_rms[self._silence_start_window][0],
+                            host_ns,
+                        )
+                    ):
+                        # A void lies inside the hold interval (possibly
+                        # between frame stamps): restart the hold after it
+                        # rather than certifying across it — or sticking.
+                        self._silence_start_window = None
+                        continue
                     if index - self._silence_start_window + 1 >= windows_per_hold:
                         stop_sample = self._silence_start_window * 320
                         self._greeting_stop_sample_16k = stop_sample
@@ -739,10 +780,30 @@ class SipSession:
         cannot arrive after a premature completion.
         """
         assert self._d_candidate_start_window is not None
+        # The judged span obeys the same verdict discipline as every
+        # certification: fully behind the watermark and void-free. A void
+        # anywhere after the anchor re-anchors Window D immediately — while
+        # the response is still flowing — instead of judging over concealed
+        # audio or waiting for a span that can never be released.
+        anchor_host = self._rx_frame_rms[self._d_candidate_start_window][0]
+        consumed_end_host = self._rx_frame_rms[self._scan_index - 1][0]
+        if not self._interval_clear(anchor_host, consumed_end_host):
+            self._event("window_d_reanchored_past_void", now_ns)
+            self._d_candidate_start_window = None
+            self._d_run_start_window = None
+            self._d_run_windows = 0
+            return
         anchor_byte = self._d_candidate_start_window * 640
         search_bytes = self.config.echo_search_ms * (ANALYSIS_SAMPLE_RATE // 1_000) * 2
         required_end = anchor_byte + len(self.config.fixture.pcm16) + search_bytes
         if len(self._rx_16k) < required_end:
+            return
+        end_frame = min(required_end // 640, len(self._rx_frame_rms) - 1)
+        end_host = self._rx_frame_rms[end_frame][0]
+        if (
+            self._scan_watermark_ns is not None
+            and end_host >= self._scan_watermark_ns
+        ):
             return
         self._echo_snapshot = bytes(self._rx_16k[anchor_byte:])
 
@@ -779,7 +840,7 @@ class SipSession:
         for host, rms in candidates:
             if (
                 self._scan_watermark_ns is not None
-                and host > self._scan_watermark_ns
+                and host >= self._scan_watermark_ns
             ):
                 break
             if self._in_void(host):
@@ -787,8 +848,22 @@ class SipSession:
                 continue
             if rms <= self.config.detector.silence_threshold_dbfs:
                 run.append(host)
-                if len(run) * FRAME_MS >= needed_ms:
-                    boundary_ns = run[0] + self.config.separating_silence_ns
+                # The certified interval is a wall-clock span: it must be
+                # fully verdicted and void-free as an interval, not merely
+                # composed of clean frame stamps. A poisoned span restarts
+                # after the void instead of sticking on it forever.
+                while run and not self._interval_clear(
+                    run[0], run[0] + self.config.separating_silence_ns
+                ):
+                    run.pop(0)
+                if not run:
+                    continue
+                boundary_candidate = run[0] + self.config.separating_silence_ns
+                if len(run) * FRAME_MS >= needed_ms and (
+                    self._scan_watermark_ns is None
+                    or boundary_candidate < self._scan_watermark_ns
+                ):
+                    boundary_ns = boundary_candidate
                     self._separation_confirmed_ns = boundary_ns
                     self._window_d_open_sample_16k = (
                         self._first_sample_at_or_after(boundary_ns)
@@ -825,10 +900,35 @@ class SipSession:
         self._flush_metadata()
         self._write_wav("rx_8k.wav", bytes(self._rx_pcmu), source="pcmu")
         self._write_wav("tx_8k.wav", bytes(self._tx_pcm_8k), source="pcm16")
+        import subprocess
+        from datetime import UTC, datetime
+        from pathlib import Path as _Path
+
+        repo_root = _Path(__file__).resolve().parents[1]
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=repo_root,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=repo_root,
+            ).stdout
+        )
         emitted = self.config.emitted
         manifest: dict[str, object] = {
             "schema_version": 1,
             "harness": "sip_media_endpoint",
+            "run_id": self.artifacts.path.name,
+            "git_commit": commit,
+            "dirty_tree": dirty,
+            "created_utc": datetime.now(UTC).isoformat(),
             "gate_outcome": (
                 "CAPTURE_COMPLETE_PENDING_REVIEW"
                 if self.outcome == "capture_complete_pending_review"
@@ -891,6 +991,17 @@ class SipSession:
                 "max_events": MAX_RX_VOID_EVENTS,
                 "max_total_ms": MAX_RX_VOID_TOTAL_NS // 1_000_000,
             },
+            # Sample-mapped voids let the manual waveform reviewer overlay
+            # exactly which recorded audio is stack concealment.
+            "rx_void_intervals": [
+                {
+                    "start_host_ns": start,
+                    "end_host_ns": end,
+                    "start_rx_sample_16k": self._first_sample_at_or_after(start),
+                    "end_rx_sample_16k": self._first_sample_at_or_after(end),
+                }
+                for start, end in self._rx_voids
+            ],
             "tx_delivery_counters": self.delivery_counters,
             "emission_boundary_tx_sample_8k": self.emission_boundary_tx_sample,
             "clock": "time.monotonic_ns",

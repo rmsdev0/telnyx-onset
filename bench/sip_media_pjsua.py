@@ -31,6 +31,11 @@ import pjsua2 as pj
 STATS_POLL_NS = 100_000_000
 EVENT_POLL_MS = 20
 DISCONNECT_WAIT_S = 10
+# Pinned jitter-buffer depth (spec §3): fixed, recorded, and used to pad
+# void intervals — the loss counter moves at packet arrival while the
+# concealed audio surfaces roughly one buffer depth later.
+JITTER_BUFFER_MS = 60
+VOID_END_PAD_NS = (JITTER_BUFFER_MS + 20) * 1_000_000
 
 
 class _HarnessPort(pj.AudioMediaPort):  # type: ignore[misc]
@@ -165,6 +170,12 @@ def run_live_call(
     ep_cfg.logConfig.level = 1
     ep_cfg.logConfig.consoleLevel = 1
     ep_cfg.logConfig.msgLogging = 0
+    # Fixed-depth jitter buffer: adaptivity trades timing determinism away
+    # and unbounds the loss-counter-to-playout skew the void padding covers.
+    ep_cfg.medConfig.jbInit = JITTER_BUFFER_MS
+    ep_cfg.medConfig.jbMinPre = JITTER_BUFFER_MS
+    ep_cfg.medConfig.jbMaxPre = JITTER_BUFFER_MS
+    ep_cfg.medConfig.jbMax = JITTER_BUFFER_MS
     ep.libInit(ep_cfg)
 
     transport_cfg = pj.TransportConfig()
@@ -207,7 +218,12 @@ def run_live_call(
     teardown_result = "hangup_sent"
     last_stats_ns = time.monotonic_ns()
     known_loss = 0
+    answered_seen = False
     delivery: dict[str, object] = {}
+    # Nothing is consumed before the first post-answer loss verdict: arm the
+    # watermark at the pre-dial instant, ahead of any rx frame.
+    with bridge.lock:
+        session.set_scan_watermark(time.monotonic_ns())
     try:
         call.makeCall(f"sip:{agent_number}@{sip_domain};transport=tls", call_prm)
         while True:
@@ -233,22 +249,37 @@ def run_live_call(
                 )
                 with bridge.lock:
                     session.apply_echo_verdict(match, time.monotonic_ns())
+            if bridge.answered and not answered_seen:
+                # Interval accounting starts at answer: pre-answer counter
+                # noise must not void (and instantly overrun) the timeline.
+                answered_seen = True
+                last_stats_ns = now_ns
+                try:
+                    known_loss = int(call.getStreamStat(0).rtcp.rxStat.loss)
+                except pj.Error:
+                    known_loss = 0
             if (
-                now_ns - last_stats_ns >= STATS_POLL_NS
-                and bridge.answered
+                answered_seen
+                and now_ns - last_stats_ns >= STATS_POLL_NS
                 and call.isActive()
             ):
                 try:
                     stat = call.getStreamStat(0)
-                    loss = int(stat.rtcp.rxStat.loss)
+                    # The counter is pjmedia's locally computed rx loss,
+                    # updated at packet arrival; clamp monotonically because
+                    # late reordered arrivals can revise it downward.
+                    loss = max(known_loss, int(stat.rtcp.rxStat.loss))
                     with bridge.lock:
                         if loss > known_loss:
                             session.report_rx_loss(
-                                loss - known_loss, last_stats_ns, now_ns
+                                loss - known_loss,
+                                last_stats_ns,
+                                now_ns + VOID_END_PAD_NS,
                             )
                         # Windows are certified only once their interval's
-                        # loss verdict is in.
-                        session.set_scan_watermark(now_ns)
+                        # loss verdict is in; the pad keeps the not-yet-
+                        # played concealment ahead of the watermark.
+                        session.set_scan_watermark(now_ns - VOID_END_PAD_NS)
                     known_loss = loss
                     # Only advance on success: a failed poll leaves its span
                     # to be verdicted (and if lossy, voided) by the next one.
@@ -290,6 +321,8 @@ def run_live_call(
                     "os_version": platform.platform(),
                     "sip_transport": "tls",
                     "greeting_tts_decode_mode": "whole_buffer",
+                    "jitter_buffer_ms": JITTER_BUFFER_MS,
+                    "void_end_pad_ms": VOID_END_PAD_NS // 1_000_000,
                     "session_backstops": {
                         "sip_session_timer_s": 90,
                         "harness_call_cap_s": 60,
