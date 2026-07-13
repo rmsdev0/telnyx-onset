@@ -1,8 +1,8 @@
 # Phase 3 preparation
 
 **Status:** Phase 3 runtime implementation and offline qualification are
-complete. The first strict-mode live qualification campaign was invalidated by
-a natural-pause false stop. Recalibration review 1 is complete and
+complete. Two strict-mode live qualification campaigns were invalidated by
+natural-pause false stops. Recalibration review 2 is complete and
 `bench/measurement_profile.json` is refrozen; the complete live qualification
 must now be rerun before final collection.
 
@@ -33,6 +33,13 @@ must now be rerun before final collection.
 - The first replacement manifest was superseded before dialing when the live
   harness preflight found test-only type-check failures. No call or measurement
   artifact was created; the runner now reports this exit before artifact lookup.
+- The complete replacement campaign then recorded 20 attempted calls. Three
+  trials exposed 400 ms natural-pause false stops, so that campaign is also
+  discarded in full. Pooling those three spans produced 1,760 records and 32
+  passing candidates; the unchanged rule selects a 600 ms hold. Its audit also
+  found that three `post_stimulus_echo_detected` harness failures were not
+  reflected by the classifier, which now requires the named successful harness
+  terminal outcome and otherwise emits `call_transport_failure`.
 - Corrected full attempt 6 (`p2-eba91f36fcd7334f`, revision `4227dff`) reached
   `CAPTURE_COMPLETE_PENDING_REVIEW` with enforced delivery, zero voids and RTP
   anomalies, and a passing independent evidence audit.

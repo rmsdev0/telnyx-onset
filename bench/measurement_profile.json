@@ -11,7 +11,7 @@
     "activity_threshold_dbfs": -42.0,
     "silence_threshold_dbfs": -42.0,
     "minimum_active_ms": 100,
-    "sustained_silence_ms": 400
+    "sustained_silence_ms": 600
   },
   "echo_gate": {
     "fixture_envelope_correlation_threshold": 0.85,
@@ -63,7 +63,7 @@
     "maximum_recorded_samples_8k": 560000
   },
   "evidence": {
-    "calibration_evidence_sha256": "ce3f7a72516227f26194dc526028a1a4c9b309133f6a82af8ad62982e5835d7a",
+    "calibration_evidence_sha256": "c099ed91a3e97a71b8cc19d5dc0cbea747ae5bfe745534db0d478a46e0397a7d",
     "prior_calibration_evidence_sha256": "21467eebbbaa842ccacd8be828b0fd5432e3b2d51ae9ad5361a0bd1848e53267",
     "recalibration_review": {
       "recorded_date": "2026-07-13",
@@ -73,6 +73,21 @@
       "pooled_label": "qualification1_trial20_resumed_natural_pause",
       "selection_rule": "same finite grid and shortest passing hold for the existing simplest threshold",
       "selected_sustained_silence_ms": 400
+    },
+    "recalibration_review_2": {
+      "recorded_date": "2026-07-13",
+      "outcome": "pass",
+      "invalidated_qualification_manifest": "bench/phase3_qualification_manifest_recalibration1b.json",
+      "failure_trial_ids": [
+        "p3q-r1b-001",
+        "p3q-r1b-003",
+        "p3q-r1b-008"
+      ],
+      "pooled_labels_added": 3,
+      "candidate_records": 1760,
+      "passing_candidates": 32,
+      "selection_rule": "same finite grid and shortest passing hold for the existing simplest threshold",
+      "selected_sustained_silence_ms": 600
     },
     "calibration_controls": {
       "agent_only": "p2-1de191a7ca4e9f33",

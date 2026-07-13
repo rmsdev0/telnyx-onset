@@ -1042,6 +1042,27 @@ The profile is refrozen at that value; qualification must restart from a new
 write-once manifest and no result from the invalidated campaign may enter the
 final comparison.
 
+### Dated recalibration review 2 — 2026-07-13
+
+The complete replacement qualification campaign was also discarded. Trials
+`p3q-r1b-001`, `p3q-r1b-003`, and `p3q-r1b-008` each produced old-response
+activity after a detector-certified 400 ms stop. Those spans were pooled as
+three additional condition-independent natural-pause labels without consulting
+comparative latency effects.
+
+Repeating the same grid over eleven labels produced 1,760 records and 32
+passing candidates. The original selection rule again retained RMS, 20 ms,
+−42/−42 dBFS, and a 100 ms arm, while selecting 600 ms as the shortest passing
+hold. The evidence SHA-256 is
+`c099ed91a3e97a71b8cc19d5dc0cbea747ae5bfe745534db0d478a46e0397a7d`.
+
+The same campaign exposed a classification omission: harness terminal failures,
+including `post_stimulus_echo_detected`, did not force
+`call_transport_failure`. The runner now requires
+`phase3_capture_complete_pending_classification` as the successful terminal
+outcome. The profile is refrozen at 600 ms and another full qualification
+campaign is required; neither invalidated campaign may enter final analysis.
+
 ### Void-aware additions to the manual review procedure
 
 For any run captured under the loss-void addendum, the manual waveform

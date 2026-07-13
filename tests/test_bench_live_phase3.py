@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
-from bench.live_phase3 import _agent_evidence, _stale_audio_resumed
+from bench.live_phase3 import (
+    _agent_evidence,
+    _harness_transport_complete,
+    _stale_audio_resumed,
+)
 from onset.types import BenchmarkMode
 
 
@@ -82,4 +86,18 @@ def test_stale_audio_window_uses_the_frozen_detector_values(tmp_path: Path) -> N
             activity_threshold_dbfs=-40.0,
         )
         is False
+    )
+
+
+def test_harness_terminal_failure_is_not_transport_complete() -> None:
+    base = {
+        "terminal_outcome": "phase3_capture_complete_pending_classification",
+        "teardown_result": "hangup_sent",
+        "rx_void_events": 0,
+        "rx_void_total_ms": 0,
+    }
+    assert _harness_transport_complete(base, clear_required=True, clear_completed=True)
+    failed = {**base, "terminal_outcome": "post_stimulus_echo_detected"}
+    assert not _harness_transport_complete(
+        failed, clear_required=True, clear_completed=True
     )

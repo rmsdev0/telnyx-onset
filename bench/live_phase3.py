@@ -79,6 +79,7 @@ def _validate_manifest_revision(declared: str, execution: str) -> None:
         "bench/phase3_qualification_manifest.json",
         "bench/phase3_qualification_manifest_recalibration1.json",
         "bench/phase3_qualification_manifest_recalibration1b.json",
+        "bench/phase3_qualification_manifest_recalibration2.json",
         "bench/phase3_final_manifest.json",
         "bench/PHASE3_REPORT.md",
     }
@@ -224,6 +225,19 @@ def _stale_audio_resumed(
     return False
 
 
+def _harness_transport_complete(
+    harness: dict[str, Any], *, clear_required: bool, clear_completed: bool
+) -> bool:
+    return bool(
+        harness.get("terminal_outcome")
+        == "phase3_capture_complete_pending_classification"
+        and harness.get("teardown_result") in {"hangup_sent", "remote_bye"}
+        and harness.get("rx_void_events", 99) <= 5
+        and harness.get("rx_void_total_ms", 1001) <= 1000
+        and (not clear_required or clear_completed)
+    )
+
+
 def _classify(
     *,
     artifact: Path,
@@ -286,11 +300,10 @@ def _classify(
     )
     action_count = agent["interrupt_action_count"]
     clear_required = isinstance(action_count, int) and action_count > 0
-    transport_complete = bool(
-        harness.get("teardown_result") in {"hangup_sent", "remote_bye"}
-        and harness.get("rx_void_events", 99) <= 5
-        and harness.get("rx_void_total_ms", 1001) <= 1000
-        and (not clear_required or agent["clear_completed"])
+    transport_complete = _harness_transport_complete(
+        harness,
+        clear_required=clear_required,
+        clear_completed=bool(agent["clear_completed"]),
     )
     evidence = TrialEvidence(
         agent_audio_active=phase3.get("agent_audio_active_at_stimulus") is True,
