@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from bench.live_calibration import WebhookLease, _validate_control_manifest
+from bench.live_calibration import (
+    WebhookLease,
+    _validate_control_manifest,
+    _validate_measurement_manifest,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,3 +66,19 @@ def test_control_manifest_requires_echo_delivery(tmp_path: Path) -> None:
     (run / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(RuntimeError, match="echo_delivery_unconfirmed"):
         _validate_control_manifest(run, "echo-control")
+
+
+def test_measurement_manifest_requires_pending_review_and_delivery(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "p2-bbbbbbbbbbbbbbbb"
+    run.mkdir()
+    manifest = {
+        "capture_mode": "measurement",
+        "gate_outcome": "CAPTURE_COMPLETE_PENDING_REVIEW",
+        "dirty_tree": False,
+        "teardown_result": "hangup_sent",
+        "tx_delivery_evidence": {"confirmed": True},
+    }
+    (run / "manifest.json").write_text(json.dumps(manifest))
+    assert _validate_measurement_manifest(run) == manifest

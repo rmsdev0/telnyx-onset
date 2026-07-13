@@ -1397,6 +1397,11 @@ def main() -> None:
     parser.add_argument("--signaling-port-range", type=int, default=10)
     parser.add_argument("--media-port", type=int, default=40_000)
     parser.add_argument("--media-port-range", type=int, default=100)
+    parser.add_argument("--detector-window-ms", type=int, default=20)
+    parser.add_argument("--activity-threshold-dbfs", type=float, default=-38.0)
+    parser.add_argument("--silence-threshold-dbfs", type=float, default=-45.0)
+    parser.add_argument("--minimum-active-ms", type=int, default=100)
+    parser.add_argument("--sustained-silence-ms", type=int, default=500)
     arguments = parser.parse_args()
     if not arguments.live:
         print("offline safety gate: no call placed; run the offline test suite")
@@ -1407,6 +1412,16 @@ def main() -> None:
         raise SystemExit("--fixture is required for live mode")
     if arguments.attempt_number <= 0:
         raise SystemExit("--attempt-number must be positive")
+    try:
+        detector = DetectorConfig(
+            window_ms=arguments.detector_window_ms,
+            activity_threshold_dbfs=arguments.activity_threshold_dbfs,
+            silence_threshold_dbfs=arguments.silence_threshold_dbfs,
+            minimum_active_ms=arguments.minimum_active_ms,
+            sustained_silence_ms=arguments.sustained_silence_ms,
+        )
+    except ValueError as error:
+        raise SystemExit(f"invalid detector candidate: {error}") from error
     for name in (
         "signaling_port",
         "signaling_port_range",
@@ -1445,6 +1460,9 @@ def main() -> None:
     print(
         "live configuration accepted: one attempt, 60-second hard cap, "
         f"mode={arguments.mode}, "
+        f"detector={detector.activity_threshold_dbfs}/"
+        f"{detector.silence_threshold_dbfs}/"
+        f"{detector.sustained_silence_ms}ms, "
         f"fixture_sha256={fixture.sha256}, emitted_sha256={emitted.sha256}"
     )
     from bench.sip_media_pjsua import run_live_call
@@ -1455,6 +1473,7 @@ def main() -> None:
             emitted=emitted,
             mode=arguments.mode,
             attempt_number=arguments.attempt_number,
+            detector=detector,
         ),
         artifacts,
         dial_requested_ns=time.monotonic_ns(),

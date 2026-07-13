@@ -43,6 +43,7 @@ def test_calibration_evidence_records_grid_without_selection(tmp_path: Path) -> 
     trailing_silence = array("h", [0] * 8_000)
     _write_run(artifact_root, "p2-aaaaaaaaaaaaaaaa", loud + short_pause + loud)
     _write_run(artifact_root, "p2-bbbbbbbbbbbbbbbb", loud + trailing_silence)
+    _write_run(artifact_root, "p2-cccccccccccccccc", trailing_silence)
     labels = tmp_path / "labels.json"
     labels.write_text(
         json.dumps(
@@ -62,6 +63,13 @@ def test_calibration_evidence_records_grid_without_selection(tmp_path: Path) -> 
                         "start_sample_8k": 0,
                         "end_sample_8k": 9_600,
                     },
+                    {
+                        "run_id": "p2-cccccccccccccccc",
+                        "label": "silence",
+                        "kind": "silence",
+                        "start_sample_8k": 0,
+                        "end_sample_8k": 8_000,
+                    },
                 ]
             }
         )
@@ -72,10 +80,10 @@ def test_calibration_evidence_records_grid_without_selection(tmp_path: Path) -> 
     assert evidence["passing_candidates"]
     records = evidence["records"]
     assert isinstance(records, list)
-    assert len(records) == 4 * 4 * 10 * 2
+    assert len(records) == 4 * 4 * 10 * 3
 
 
-def test_labels_require_both_kinds_and_safe_run_id(tmp_path: Path) -> None:
+def test_labels_require_all_kinds_and_safe_run_id(tmp_path: Path) -> None:
     labels = tmp_path / "labels.json"
     labels.write_text(
         json.dumps(

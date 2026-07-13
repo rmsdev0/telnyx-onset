@@ -30,7 +30,7 @@ from bench.acoustic_stop import (
 class SegmentSpec:
     run_id: str
     label: str
-    kind: Literal["natural_pause", "forced_stop"]
+    kind: Literal["natural_pause", "silence", "forced_stop"]
     start_sample_8k: int
     end_sample_8k: int
 
@@ -64,7 +64,7 @@ def load_segment_specs(path: Path) -> tuple[SegmentSpec, ...]:
             or not isinstance(label, str)
             or not label
             or label in labels
-            or kind not in {"natural_pause", "forced_stop"}
+            or kind not in {"natural_pause", "silence", "forced_stop"}
             or not isinstance(start, int)
             or isinstance(start, bool)
             or not isinstance(end, int)
@@ -83,8 +83,12 @@ def load_segment_specs(path: Path) -> tuple[SegmentSpec, ...]:
                 end_sample_8k=end,
             )
         )
-    if {spec.kind for spec in specs} != {"natural_pause", "forced_stop"}:
-        raise ValueError("both_calibration_label_kinds_required")
+    if {spec.kind for spec in specs} != {
+        "natural_pause",
+        "silence",
+        "forced_stop",
+    }:
+        raise ValueError("all_calibration_label_kinds_required")
     return tuple(specs)
 
 

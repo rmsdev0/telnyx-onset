@@ -26,6 +26,7 @@ from bench.acoustic_probe import ARTIFACT_ROOT, REPOSITORY_ROOT
 
 API_BASE = "https://api.telnyx.com/v2"
 CONTROL_MODES = ("agent-only", "no-stimulus", "echo-control")
+CAPTURE_MODES = (*CONTROL_MODES, "measurement")
 
 
 def _object(value: object, category: str) -> dict[str, Any]:
@@ -135,6 +136,28 @@ def _validate_control_manifest(path: Path, mode: str) -> dict[str, object]:
     return manifest
 
 
+def _validate_measurement_manifest(path: Path) -> dict[str, object]:
+    manifest = _object(
+        json.loads((path / "manifest.json").read_text()), "manifest_invalid"
+    )
+    if manifest.get("capture_mode") != "measurement":
+        raise RuntimeError("capture_mode_mismatch")
+    if manifest.get("gate_outcome") != "CAPTURE_COMPLETE_PENDING_REVIEW":
+        raise RuntimeError(
+            f"measurement_capture_failed:{manifest.get('failure_category')}"
+        )
+    if manifest.get("dirty_tree") is not False:
+        raise RuntimeError("capture_dirty_tree")
+    delivery = _object(
+        manifest.get("tx_delivery_evidence"), "delivery_evidence_missing"
+    )
+    if delivery.get("confirmed") is not True:
+        raise RuntimeError("measurement_delivery_unconfirmed")
+    if manifest.get("teardown_result") not in {"hangup_sent", "remote_bye"}:
+        raise RuntimeError("measurement_teardown_unconfirmed")
+    return manifest
+
+
 async def _health(client: httpx.AsyncClient, url: str) -> None:
     response = await client.get(url)
     response.raise_for_status()
@@ -153,6 +176,13 @@ async def run(arguments: argparse.Namespace) -> list[dict[str, object]]:
     application_id = environment.get("TELNYX_CONNECTION_ID", "")
     if not api_key or not application_id:
         raise RuntimeError("telnyx_configuration_missing")
+    if arguments.attempt_start <= 0:
+        raise RuntimeError("attempt_start_invalid")
+    output = arguments.output
+    if not output.is_absolute():
+        output = REPOSITORY_ROOT / output
+    if output.resolve().parent != ARTIFACT_ROOT.resolve():
+        raise RuntimeError("session_output_must_be_in_artifact_root")
     headers = {"Authorization": f"Bearer {api_key}"}
     timeout = httpx.Timeout(20.0)
     results: list[dict[str, object]] = []
@@ -163,7 +193,9 @@ async def run(arguments: argparse.Namespace) -> list[dict[str, object]]:
         await _health(health_client, "http://127.0.0.1:8001/health")
         await _health(health_client, public_health)
         async with WebhookLease(api, application_id, arguments.webhook_url):
-            for attempt_number, mode in enumerate(CONTROL_MODES, start=1):
+            for attempt_number, mode in enumerate(
+                arguments.modes, start=arguments.attempt_start
+            ):
                 before = {
                     path.name
                     for path in ARTIFACT_ROOT.iterdir()
@@ -180,6 +212,16 @@ async def run(arguments: argparse.Namespace) -> list[dict[str, object]]:
                     mode,
                     "--attempt-number",
                     str(attempt_number),
+                    "--detector-window-ms",
+                    str(arguments.detector_window_ms),
+                    "--activity-threshold-dbfs",
+                    str(arguments.activity_threshold_dbfs),
+                    "--silence-threshold-dbfs",
+                    str(arguments.silence_threshold_dbfs),
+                    "--minimum-active-ms",
+                    str(arguments.minimum_active_ms),
+                    "--sustained-silence-ms",
+                    str(arguments.sustained_silence_ms),
                 ]
                 call_environment = dict(environment)
                 call_environment["BENCH_LIVE"] = "1"
@@ -192,7 +234,11 @@ async def run(arguments: argparse.Namespace) -> list[dict[str, object]]:
                 if completed.returncode != 0:
                     raise RuntimeError(f"calibration_process_failed:{mode}")
                 artifact = _new_artifact(before)
-                manifest = _validate_control_manifest(artifact, mode)
+                manifest = (
+                    _validate_measurement_manifest(artifact)
+                    if mode == "measurement"
+                    else _validate_control_manifest(artifact, mode)
+                )
                 results.append(
                     {
                         "mode": mode,
@@ -201,7 +247,6 @@ async def run(arguments: argparse.Namespace) -> list[dict[str, object]]:
                         "git_commit": manifest.get("git_commit"),
                     }
                 )
-    output = ARTIFACT_ROOT / "calibration_session.json"
     output.write_text(json.dumps({"captures": results}, indent=2) + "\n")
     return results
 
@@ -210,6 +255,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--webhook-url", required=True)
     parser.add_argument("--fixture", type=Path, required=True)
+    parser.add_argument(
+        "--modes", nargs="+", choices=CAPTURE_MODES, default=CONTROL_MODES
+    )
+    parser.add_argument("--attempt-start", type=int, default=1)
+    parser.add_argument(
+        "--output", type=Path, default=ARTIFACT_ROOT / "calibration_session.json"
+    )
+    parser.add_argument("--detector-window-ms", type=int, default=20)
+    parser.add_argument("--activity-threshold-dbfs", type=float, default=-38.0)
+    parser.add_argument("--silence-threshold-dbfs", type=float, default=-45.0)
+    parser.add_argument("--minimum-active-ms", type=int, default=100)
+    parser.add_argument("--sustained-silence-ms", type=int, default=500)
     arguments = parser.parse_args()
     results = asyncio.run(run(arguments))
     for result in results:

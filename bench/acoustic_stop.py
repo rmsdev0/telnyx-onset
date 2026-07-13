@@ -81,7 +81,7 @@ class LabeledCalibrationSegment:
     """A local synthetic/baseline segment excluded from benchmark results."""
 
     label: str
-    kind: Literal["natural_pause", "forced_stop"]
+    kind: Literal["natural_pause", "silence", "forced_stop"]
     pcm16: bytes
 
 
