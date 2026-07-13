@@ -172,6 +172,11 @@ def run_live_call(
     acc_cfg = pj.AccountConfig()
     acc_cfg.idUri = f"sip:{caller_id}@{sip_domain}"
     acc_cfg.regConfig.registerOnAdd = False
+    # Process-independent call bound (spec §4): if this process dies mid-call,
+    # the unrefreshed session timer clears the dialog at the far end.
+    acc_cfg.callConfig.timerUse = pj.PJSUA_SIP_TIMER_ALWAYS
+    acc_cfg.callConfig.timerSessExpiresSec = 90
+    acc_cfg.callConfig.timerMinSESec = 90
     cred = pj.AuthCredInfo("digest", "*", sip_username, 0, sip_password)
     acc_cfg.sipConfig.authCreds.append(cred)
     account = pj.Account()
@@ -204,7 +209,26 @@ def run_live_call(
                 outcome = session.outcome
             if bridge.remote_disconnected:
                 outcome = outcome or "call_hangup"
-            if now_ns - last_stats_ns >= STATS_POLL_NS and call.isActive():
+            snapshot = None
+            with bridge.lock:
+                snapshot = session.pending_echo_check()
+            if snapshot is not None:
+                # Heavy correlation runs here, off the media path and outside
+                # the lock, so the stack's frame clock is never starved.
+                from bench.acoustic_probe import match_fixture_reference
+
+                match = match_fixture_reference(
+                    snapshot,
+                    session.config.fixture,
+                    maximum_alignment_ms=session.config.echo_search_ms,
+                )
+                with bridge.lock:
+                    session.apply_echo_verdict(match, time.monotonic_ns())
+            if (
+                now_ns - last_stats_ns >= STATS_POLL_NS
+                and bridge.answered
+                and call.isActive()
+            ):
                 last_stats_ns = now_ns
                 try:
                     stat = call.getStreamStat(0)
@@ -250,6 +274,26 @@ def run_live_call(
                     "os_version": platform.platform(),
                     "sip_transport": "tls",
                     "greeting_tts_decode_mode": "whole_buffer",
+                    "session_backstops": {
+                        "sip_session_timer_s": 90,
+                        "harness_call_cap_s": 60,
+                    },
                 },
             )
-        ep.libDestroy()
+        # pjsua2's Python wrappers are prone to destructor-order asserts once
+        # the library is torn down (observed on the first live attempt).
+        # Artifacts are already flushed, so destroy on a bounded side thread
+        # and let the CLI hard-exit rather than risk an abort-shaped teardown.
+        destroyer = threading.Thread(target=_best_effort_destroy(ep), daemon=True)
+        destroyer.start()
+        destroyer.join(timeout=10)
+
+
+def _best_effort_destroy(ep: pj.Endpoint):  # type: ignore[no-untyped-def]
+    def run() -> None:
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            ep.libDestroy()
+
+    return run

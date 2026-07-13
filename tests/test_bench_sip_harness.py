@@ -93,6 +93,16 @@ class Driver:
             )
         )
         self.session.tick(self.now_ns)
+        # Mirror the live adapter loop: the heavy fixture correlation runs
+        # off the media path via snapshot + verdict.
+        snapshot = self.session.pending_echo_check()
+        if snapshot is not None:
+            match = match_fixture_reference(
+                snapshot,
+                self.session.config.fixture,
+                maximum_alignment_ms=self.session.config.echo_search_ms,
+            )
+            self.session.apply_echo_verdict(match, self.now_ns)
         self.now_ns += NS_PER_FRAME
 
     def run(self, frames: int, rx_pcm16_8k: bytes | None = None) -> None:
@@ -201,16 +211,24 @@ def test_activity_without_stop_times_out_as_natural_stop_not_observed(
     assert session.outcome == "natural_stop_not_observed"
 
 
+def _drive_to_armed(driver: Driver) -> None:
+    """Greeting plus confirmed natural stop, robust to analysis cadence."""
+    driver.run(10, LOUD_8K)
+    for _ in range(60):
+        if driver.session.greeting_stop_ns is not None:
+            return
+        driver.exchange(QUIET_8K)
+    raise AssertionError("natural stop was not confirmed")
+
+
 def test_rx_activity_during_fixture_is_stimulus_overlap(tmp_path: Path) -> None:
     session = _session(tmp_path)
     driver = Driver(session)
     driver.answer()
-    driver.run(10, LOUD_8K)
-    driver.run(30, QUIET_8K)
-    assert session.greeting_stop_ns is not None
-    driver.run(2, QUIET_8K)  # fixture transmission begins
+    _drive_to_armed(driver)
+    driver.exchange(LOUD_8K)  # fixture frame 1 on the wire; rx goes loud
     assert session.emission_boundary_ns is not None
-    driver.run(3, LOUD_8K)  # rx activity while the fixture is on the wire
+    driver.exchange(LOUD_8K)
     assert session.outcome == "stimulus_overlap"
 
 
@@ -220,12 +238,13 @@ def test_continuous_activity_after_fixture_is_boundary_ambiguous(
     session = _session(tmp_path)
     driver = Driver(session)
     driver.answer()
-    driver.run(10, LOUD_8K)
-    driver.run(30, QUIET_8K)
-    fixture_frames = len(session.config.emitted.pcmu_frames)
-    driver.run(fixture_frames + 2, QUIET_8K)
+    _drive_to_armed(driver)
+    for _ in range(60):  # quiet through transmission only
+        if session.fixture_end_ns is not None:
+            break
+        driver.exchange(QUIET_8K)
     assert session.fixture_end_ns is not None
-    driver.run(900, LOUD_8K)  # never 100 ms of silence
+    driver.run(900, LOUD_8K)  # activity begins immediately: no 100 ms silence
     assert session.outcome == "stimulus_boundary_ambiguous"
 
 

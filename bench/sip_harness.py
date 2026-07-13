@@ -21,9 +21,8 @@ from typing import TYPE_CHECKING
 from bench.acoustic_probe import (
     Fixture,
     decode_pcmu_8k_to_pcm16_16k,
-    match_fixture_reference,
 )
-from bench.acoustic_stop import DetectorConfig, analyze_acoustic_stop
+from bench.acoustic_stop import DetectorConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,7 +41,6 @@ SEPARATING_SILENCE_NS = 100 * 1_000_000
 ECHO_SEARCH_MS = 4_000
 # Cumulative tx handoff-cadence drift bound: half a frame period.
 TX_DRIFT_BOUND_NS = FRAME_MS * 1_000_000 // 2
-ANALYSIS_INTERVAL_FRAMES = 10
 MAX_RECORDED_SAMPLES_8K = (60 + 10) * SAMPLE_RATE_8K
 DECIMATION_RULE = "hamming63_lowpass3400_group_delay_compensated_decimate2"
 
@@ -205,35 +203,12 @@ class SipSessionConfig:
 _SILENCE_PCMU_FRAME = encode_pcm16_to_pcmu(bytes(PCM16_8K_FRAME_BYTES))
 
 
-def _sustained_activity_anchor(pcm16: bytes, config: DetectorConfig) -> int | None:
-    """First sample of the first run of active windows totalling the arm time.
-
-    Mirrors analyze_acoustic_stop's arming rule so an isolated blip (the
-    live-attempt-6 false-anchor failure mode) cannot anchor Window A.
-    """
-    samples = array("h")
-    samples.frombytes(pcm16)
-    size = config.window_samples
-    minimum = config.sample_rate * config.minimum_active_ms // 1_000
-    run_start: int | None = None
-    run_samples = 0
-    for start in range(0, len(samples), size):
-        end = min(start + size, len(samples))
-        total = 0
-        for value in samples[start:end]:
-            total += int(value) * int(value)
-        rms = math.sqrt(total / (end - start)) if end > start else 0.0
-        dbfs = -math.inf if rms == 0 else 20.0 * math.log10(rms / 32_768.0)
-        if dbfs >= config.activity_threshold_dbfs:
-            if run_start is None:
-                run_start = start
-            run_samples += end - start
-            if run_samples >= minimum:
-                return run_start
-        else:
-            run_start = None
-            run_samples = 0
-    return None
+# Each decoded rx frame is exactly one 20 ms detector window (320 samples at
+# the 16 kHz analysis rate), so the incremental state machine below operates
+# on the per-frame RMS values recorded at ingest. Live attempt 1 (SIP) proved
+# that re-scanning raw PCM per frame starves the stack's media clock; the
+# window rules themselves (sustained-activity arming per the attempt-6 guard,
+# backdated stop, hold durations) are unchanged from analyze_acoustic_stop.
 
 
 class SipSession:
@@ -270,11 +245,19 @@ class SipSession:
             "sequence_regressions": 0,
             "timestamp_anomalies": 0,
         }
-        # windows
+        # windows (incremental 20 ms detector state; one rx frame == one window)
         self.anchor_ns: int | None = None
         self.anchor_sample_16k: int | None = None
         self.greeting_stop_ns: int | None = None
         self._greeting_stop_sample_16k: int | None = None
+        self._scan_index = 0
+        self._run_start_window: int | None = None
+        self._run_windows = 0
+        self._silence_start_window: int | None = None
+        self._d_run_start_window: int | None = None
+        self._d_run_windows = 0
+        self._echo_snapshot: bytes | None = None
+        self._cadence_gate_active = True
         # tx state
         self._tx_pcm_8k = bytearray()
         self._tx_index = 0
@@ -375,8 +358,6 @@ class SipSession:
         )
         self._rx_frame_count += 1
         self._check_stimulus_overlap(frame.host_receive_monotonic_ns, rms)
-        if self._rx_frame_count % ANALYSIS_INTERVAL_FRAMES == 0:
-            self._analyze(frame.host_receive_monotonic_ns)
 
     def pull_tx_frame(self, now_ns: int) -> bytes:
         """Media-clock frame request; returns one 160-byte PCMU payload."""
@@ -390,7 +371,12 @@ class SipSession:
                 drift_ns=now_ns - ideal_ns,
                 frame_index=self._tx_index,
             )
-            self._fail("media_ordering_anomaly", now_ns)
+            # The cadence gate protects the emission boundary and the
+            # tx-silence guarantee; after separating silence is confirmed the
+            # tx channel is constant silence, so later drift is recorded but
+            # is not a measurement defect.
+            if self._cadence_gate_active:
+                self._fail("media_ordering_anomaly", now_ns)
         frame = _SILENCE_PCMU_FRAME
         emitted = self.config.emitted
         if self._fixture_armed and self._fixture_frame_next < len(
@@ -426,7 +412,11 @@ class SipSession:
         return frame
 
     def tick(self, now_ns: int) -> None:
-        """Deadline enforcement; the media layer calls this periodically."""
+        """Analysis and deadline enforcement, called off the media path."""
+        if self.outcome is not None:
+            return
+        if self.answered_ns is not None and self._rx_frames:
+            self._analyze(now_ns)
         if self.outcome is not None:
             return
         if now_ns - self.dial_requested_ns >= self.config.call_cap_ns:
@@ -537,48 +527,124 @@ class SipSession:
 
     def _check_stimulus_overlap(self, host_ns: int, rms_dbfs: float) -> None:
         if (
-            self.emission_boundary_ns is not None
-            and self.fixture_end_ns is not None
-            and self.emission_boundary_ns <= host_ns <= self.fixture_end_ns
-            and rms_dbfs >= self.config.detector.activity_threshold_dbfs
+            self.emission_boundary_ns is None
+            or rms_dbfs < self.config.detector.activity_threshold_dbfs
+            or host_ns < self.emission_boundary_ns
         ):
+            return
+        # An active rx frame while the fixture is still on the wire
+        # (fixture_end_ns unset) is overlap just as much as one inside the
+        # completed transmission interval. The interval is half-open: a frame
+        # timestamped exactly at fixture_end carries post-transmission audio.
+        if self.fixture_end_ns is None or host_ns < self.fixture_end_ns:
             self._fail("stimulus_overlap", host_ns)
 
     def _analyze(self, now_ns: int) -> None:
+        """Advance the incremental window state machine over new rx frames."""
         detector = self.config.detector
-        rx = bytes(self._rx_16k)
-        if self.anchor_ns is None:
-            anchor_sample = _sustained_activity_anchor(rx, detector)
-            if anchor_sample is not None:
-                self.anchor_sample_16k = anchor_sample
-                self.anchor_ns = self._host_time_for_sample(anchor_sample)
-                self._event(
-                    "window_a_anchor",
-                    self.anchor_ns,
-                    sample_16k=anchor_sample,
-                )
-        if self.anchor_ns is None:
-            return
-        if self.greeting_stop_ns is None:
-            analysis = analyze_acoustic_stop(rx, detector)
-            if analysis.result is not None:
-                stop_sample = analysis.result.silence_start_sample
-                self._greeting_stop_sample_16k = stop_sample
-                self.greeting_stop_ns = self._host_time_for_sample(stop_sample)
-                self._event(
-                    "agent_natural_stop_confirmed",
-                    now_ns,
-                    backdated_sample_16k=stop_sample,
-                )
-                self._fixture_armed = True
-                self._event("stimulus_armed", now_ns)
-            return
-        if self.fixture_end_ns is None:
-            return
-        if self._separation_confirmed_ns is None:
+        windows_per_hold = detector.sustained_silence_ms // FRAME_MS
+        windows_to_arm = detector.minimum_active_ms // FRAME_MS
+        while self._scan_index < len(self._rx_frame_rms):
+            index = self._scan_index
+            host_ns, rms = self._rx_frame_rms[index]
+            self._scan_index += 1
+            active = rms >= detector.activity_threshold_dbfs
+            silent = rms <= detector.silence_threshold_dbfs
+            if self.anchor_ns is None:
+                if active:
+                    if self._run_start_window is None:
+                        self._run_start_window = index
+                    self._run_windows += 1
+                    if self._run_windows >= windows_to_arm:
+                        self.anchor_sample_16k = self._run_start_window * 320
+                        self.anchor_ns = self._rx_frame_rms[
+                            self._run_start_window
+                        ][0]
+                        self._event(
+                            "window_a_anchor",
+                            self.anchor_ns,
+                            sample_16k=self.anchor_sample_16k,
+                        )
+                else:
+                    self._run_start_window = None
+                    self._run_windows = 0
+                continue
+            if self.greeting_stop_ns is None:
+                if active:
+                    self._silence_start_window = None
+                elif silent:
+                    if self._silence_start_window is None:
+                        self._silence_start_window = index
+                    if index - self._silence_start_window + 1 >= windows_per_hold:
+                        stop_sample = self._silence_start_window * 320
+                        self._greeting_stop_sample_16k = stop_sample
+                        self.greeting_stop_ns = self._rx_frame_rms[
+                            self._silence_start_window
+                        ][0]
+                        self._event(
+                            "agent_natural_stop_confirmed",
+                            now_ns,
+                            backdated_sample_16k=stop_sample,
+                        )
+                        self._fixture_armed = True
+                        self._event("stimulus_armed", now_ns)
+                else:
+                    self._silence_start_window = None
+                continue
+            if self._window_d_open_sample_16k is None:
+                continue
+            if host_ns < (self._separation_confirmed_ns or 0):
+                continue
+            if self._echo_snapshot is not None or self.outcome is not None:
+                continue
+            if active:
+                if self._d_run_start_window is None:
+                    self._d_run_start_window = index
+                self._d_run_windows += 1
+                if self._d_run_windows >= windows_to_arm:
+                    self._prepare_echo_snapshot(now_ns)
+            else:
+                self._d_run_start_window = None
+                self._d_run_windows = 0
+        if (
+            self.fixture_end_ns is not None
+            and self._separation_confirmed_ns is None
+        ):
             self._evaluate_separating_silence(now_ns)
+
+    def _prepare_echo_snapshot(self, now_ns: int) -> None:
+        """Snapshot Window D audio once enough exists to judge an echo.
+
+        The correlation itself is expensive and runs OUTSIDE the media path:
+        the driving loop collects the snapshot via pending_echo_check() and
+        returns the verdict via apply_echo_verdict(). Completion is withheld
+        until the snapshot covers the full fixture at the activity's offset,
+        so a fast-arriving echo cannot slip through unjudged.
+        """
+        assert self._window_d_open_sample_16k is not None
+        assert self._d_run_start_window is not None
+        post_start = self._window_d_open_sample_16k * 2
+        post = bytes(self._rx_16k[post_start:])
+        anchor_byte = self._d_run_start_window * 640 - post_start
+        required = max(0, anchor_byte) + len(self.config.fixture.pcm16)
+        if len(post) < required:
             return
-        self._evaluate_window_d(now_ns)
+        self._echo_snapshot = post
+        self._event("window_d_candidate", now_ns)
+
+    def pending_echo_check(self) -> bytes | None:
+        """Window D audio awaiting the off-path fixture correlation."""
+        return self._echo_snapshot if self.outcome is None else None
+
+    def apply_echo_verdict(self, match: object | None, now_ns: int) -> None:
+        if self.outcome is not None or self._echo_snapshot is None:
+            return
+        self._echo_snapshot = None
+        if match is not None:
+            self._fail("post_stimulus_echo_detected", now_ns)
+            return
+        self.outcome = "capture_complete_pending_review"
+        self._event("capture_completed", now_ns)
 
     def _evaluate_separating_silence(self, now_ns: int) -> None:
         """Find the first contiguous 100 ms of rx silence after the fixture.
@@ -605,6 +671,9 @@ class SipSession:
                     self._window_d_open_sample_16k = (
                         self._first_sample_at_or_after(boundary_ns)
                     )
+                    # tx is constant silence from here on; drift can no
+                    # longer corrupt a measured boundary.
+                    self._cadence_gate_active = False
                     self._event(
                         "separating_silence_confirmed",
                         now_ns,
@@ -613,39 +682,6 @@ class SipSession:
                     return
             else:
                 run = []
-
-    def _evaluate_window_d(self, now_ns: int) -> None:
-        assert self._window_d_open_sample_16k is not None
-        post = bytes(self._rx_16k[self._window_d_open_sample_16k * 2 :])
-        anchor = _sustained_activity_anchor(post, self.config.detector)
-        if anchor is None:
-            return
-        # The echo gate can only rule on activity once enough post-boundary
-        # audio exists to align the full fixture at the activity's offset;
-        # completing earlier would let a fast-arriving echo through unjudged.
-        required = anchor * 2 + len(self.config.fixture.pcm16)
-        if len(post) < required:
-            return
-        echo = match_fixture_reference(
-            post,
-            self.config.fixture,
-            maximum_alignment_ms=self.config.echo_search_ms,
-        )
-        if echo is not None:
-            self._fail("post_stimulus_echo_detected", now_ns)
-            return
-        self.outcome = "capture_complete_pending_review"
-        self._event("capture_completed", now_ns)
-
-    def _host_time_for_sample(self, sample_16k: int) -> int:
-        byte_offset = sample_16k * 2
-        best = self._rx_frames[0][1] if self._rx_frames else 0
-        for offset, host_ns in self._rx_frames:
-            if offset <= byte_offset:
-                best = host_ns
-            else:
-                break
-        return best
 
     def _first_sample_at_or_after(self, host_ns: int) -> int:
         for offset, frame_host in self._rx_frames:
@@ -876,8 +912,13 @@ def main() -> None:
     print(
         "terminal outcome: "
         f"{session.outcome} teardown={session.teardown_result} "
-        f"artifacts={artifacts.path.name}"
+        f"artifacts={artifacts.path.name}",
+        flush=True,
     )
+    # Artifacts are flushed and the endpoint was destroyed best-effort; exit
+    # hard so pjsua2 wrapper destructor ordering can never abort the process
+    # after a completed run (observed on the first live attempt).
+    os._exit(0)
 
 
 if __name__ == "__main__":
