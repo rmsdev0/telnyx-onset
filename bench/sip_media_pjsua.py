@@ -81,16 +81,30 @@ class _Call(pj.Call):  # type: ignore[misc]
                 media.type == pj.PJMEDIA_TYPE_AUDIO
                 and media.status == pj.PJSUA_CALL_MEDIA_ACTIVE
             ):
-                stream = self.getStreamInfo(index)
-                signature = (
-                    str(stream.codecName),
-                    int(stream.codecClockRate),
-                    int(stream.codecChannelCount),
-                    int(stream.dir),
-                    int(stream.txPt),
-                    int(stream.rxPt),
-                )
-                self._bridge.observe_media_signature(signature)
+                # PJSUA2's generated Python surface differs across releases:
+                # 2.15 exposes the channel count through audCodecParam.info,
+                # while some builds expose codecChannelCount directly.  Media
+                # attachment must not depend on that optional convenience
+                # property; otherwise an AttributeError in this callback leaves
+                # an answered call with no bridge attached.
+                try:
+                    stream = self.getStreamInfo(index)
+                    channel_count = getattr(stream, "codecChannelCount", None)
+                    if channel_count is None:
+                        channel_count = stream.audCodecParam.info.channelCnt
+                    signature = (
+                        str(stream.codecName),
+                        int(stream.codecClockRate),
+                        int(channel_count),
+                        int(stream.dir),
+                        int(stream.txPt),
+                        int(stream.rxPt),
+                    )
+                    self._bridge.observe_media_signature(signature)
+                except (AttributeError, TypeError, pj.Error):
+                    # Renegotiation evidence is best-effort when bindings omit
+                    # stream metadata. The audio bridge remains mandatory.
+                    pass
                 audio = self.getAudioMedia(index)
                 self._bridge.attach_media(audio)
 
