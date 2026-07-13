@@ -560,11 +560,15 @@ new decision about whether runtime benchmark work should continue.
 
 ### Amendment 1 — 2026-07-12: external SIP media-endpoint harness
 
-**Status:** drafted; NOT in force until it passes the methodology review this
-plan requires for amendments. No qualification or final comparative data have
-been collected under any capture path, so no captured data are invalidated by
-this amendment; the Phase 2 live-attempt evidence is retained as evidence and
-is never pooled with measurement data.
+**Status:** revision 2, drafted; NOT in force until it passes a final
+methodology review. A first independent methodology review (five adversarial
+lenses: plan consistency, measurement validity, evidence audit,
+security/operations, implementability) was completed 2026-07-12 and returned
+twenty-eight findings; all are incorporated in this revision and in
+`bench/SIP_HARNESS_SPEC.md` revision 2. No qualification or final comparative
+data have been collected under any capture path, so no captured data are
+invalidated; the Phase 2 live-attempt record is retained as evidence and is
+never pooled with measurement data.
 
 **What failed.** The Phase 2 hard gate — one common harness that emits the
 stimulus, captures returned agent audio, and timestamps both on one monotonic
@@ -573,59 +577,111 @@ provider media streams on Telnyx Call Control legs. Twenty-six bounded live
 attempts established the controlling provider behaviors on this account and
 topology (evidence in `bench/PHASE2_REPORT.md`):
 
-1. A call leg carrying any bidirectional media stream exposes no usable
-   provider-outbound track on any stream attached to that leg (attempts 10,
-   11, 24, 26).
-2. Every inbound-direction surface on the agent leg mirrors the agent's own
-   websocket-injected audio within approximately one millisecond of its
-   delivery to the opposite leg (attempts 21, 22, 24).
+1. A call leg carrying a bidirectional media stream exposes no usable
+   provider-outbound track on any stream attached to that leg: attempts 10
+   and 11 (the probe leg's own bidirectional stream), attempts 8 and 22 (the
+   agent leg's own bidirectional stream), and attempt 26 (a sibling
+   receive-only stream on the same leg, with caller-line delivery
+   demonstrably flowing). Attempt 24 also observed zero outbound frames but
+   is confounded with behavior 4 below and is cited only there.
+2. Inbound-direction surfaces on the agent leg mirror the agent's own
+   websocket-injected audio: attempt 22 measured the mirror on the
+   bidirectional socket's inbound track within approximately one millisecond
+   of delivery to the opposite leg, and attempt 24 extended it to the
+   separate receive-only monitor stream's inbound track (identical active
+   window and peak). Attempt 21's `self`-target recirculation loop was a
+   distinct, since-explained phenomenon and is not cited for the mirror.
 3. Receive-only streams inherit the leg's media context and do not honor
-   codec overrides (attempts 13, 14, 23, 25).
+   codec overrides: attempts 13, 14, and 23. Attempt 25 showed the adjacent
+   behavior that an attached stream's start metadata reports the leg's media
+   context even on a bidirectional stream.
 4. A Call Control-answered harness endpoint transmits no RTP, so
-   delivery-gated provider tracks starve (attempt 24).
+   delivery-gated provider tracks starve: attempt 24.
 
-The production agent requires its bidirectional stream, so rules 1 and 2
+The production agent requires its bidirectional stream, so behaviors 1 and 2
 jointly preclude any clean stimulus-reference channel on the agent leg, and
-rule 1 precludes feeding the agent leg caller audio without destroying the
-returned-agent channel on the harness leg (attempt 26). Per Section 20, this
-failure is not permission to substitute a provider event; it requires this
-dated amendment and another methodology review.
+behavior 1 precludes feeding the agent leg caller audio without destroying
+the returned-agent channel on the harness leg (attempt 26). Per Section 20,
+this failure is not permission to substitute a provider event; it requires
+this dated amendment and another methodology review.
 
-**What changes.** The measurement harness becomes an external SIP media
-endpoint: a local SIP user agent registered against a dedicated Telnyx SIP
-credentials connection places the call to the agent number, terminates media
-itself with the negotiated codec pinned to PCMU, continuously transmits the
-caller line, and records both directions locally. The returned-agent channel
-is the received media recorded at the harness; the stimulus reference is the
-transmitted media recorded at the harness. Emission and capture share one
-process and one monotonic clock by construction. The full specification is
-`bench/SIP_HARNESS_SPEC.md`. The Call Control application, webhook workflow,
-and provider media streaming are removed from the measurement path entirely;
-the agent side keeps the untouched production runtime.
+**What changes.**
+
+1. *Capture topology.* The measurement harness becomes an external SIP media
+   endpoint: a local SIP user agent on a dedicated Telnyx SIP credentials
+   connection places the call to the agent number, terminates media itself
+   with the negotiated codec pinned to PCMU, continuously transmits the
+   caller line, and records both directions locally. Emission and capture
+   share one process and one monotonic clock by construction. The Call
+   Control application, webhook workflow, and provider media streaming are
+   removed from the measurement path; the agent side keeps the untouched
+   production runtime. Full specification: `bench/SIP_HARNESS_SPEC.md`.
+2. *Track logic.* The joint two-track selection rule ("one and only one
+   track must carry the greeting; one and only one other track must match
+   the known fixture") is superseded under Section 7's pre-registered
+   allowance for "an isolated returned-agent channel plus a stimulus
+   reference." The returned-agent channel is the received media recorded at
+   the harness; the stimulus reference is the transmitted media recorded at
+   the harness, which corresponds to the fixture by construction rather than
+   by correlation. Consequently the returned-fixture correlation gate is
+   replaced by an explicit transmit-delivery confirmation gate
+   (`stimulus_delivery_failed` on unaccounted transmit counters), and the
+   categories `track_ambiguous`, `fixture_match_missing`,
+   `fixture_match_ambiguous`, and `cross_channel_alignment_failed` are
+   retired as structurally unreachable. The specification enumerates the
+   full taxonomy disposition, including new named categories for receive
+   timeline discontinuities and post-stimulus echo.
+3. *Greeting anchor.* The bench-only causal `greeting_output_started` gate
+   (added after live attempt 6 to exclude pre-greeting setup media) is not
+   observable at a SIP harness. Window A is instead anchored on received
+   activity that satisfies a sustained-activity rule, with early media
+   excluded and the attempt-6 false-anchor failure mode explicitly guarded
+   as specified. This is a disclosed change to the anchoring mechanism, not
+   to any detector threshold or window definition.
+4. *Metric composition.* Harness-boundary interruption latency measured at a
+   SIP endpoint physically includes both one-way media transits (stimulus
+   toward the agent; returned audio toward the harness) and the harness's
+   bounded receive-path delay. The metric definition is unchanged — both
+   endpoints remain harness-boundary events — but durations measured under
+   this amendment must never be pooled with, or directly compared against,
+   provider-boundary or prior-topology durations. A per-trial transit
+   covariate is recorded alongside, and never subtracted from, the headline
+   metric.
+5. *Emitted-stimulus artifact.* The transmitted stimulus is an 8 kHz,
+   PCMU-encoded derivative of the canonical 16 kHz fixture, produced by a
+   frozen anti-aliased decimation rule. The derived waveform is hashed and
+   recorded as a first-class fixture artifact, and the emission boundary is
+   defined against the first active sample recomputed on the derived
+   waveform. The canonical 16 kHz fixture and hash are retained for
+   provenance.
 
 **Why this strengthens rather than weakens the registered method.** The
 primary endpoint is defined at "the controlled harness boundary." The prior
 path approximated stimulus emission with a provider playback command fetched
 over HTTPS — a provider-side handoff — and approximated capture through
 provider stream forks. Under this amendment both endpoint events are genuine
-harness-boundary events. Section 7's capture-channel-separation rule required
-"a topology that exposes an isolated returned-agent channel plus a stimulus
-reference"; the SIP harness satisfies it by construction rather than by
-provider topology.
+harness-boundary events. Channel separation is satisfiable under Section 7's
+stimulus-reference allowance, contingent on the Section 7 loopback and
+cross-feed calibration captures being run under the SIP topology (including
+a stimulus-echo control, which the Section 13 no-stimulus controls cannot
+provide) before any detector freeze.
 
 **What does not change.** The metric name and definition; the frozen detector
-candidate structure and its bounded calibration rules; the window (A–D)
-evidence rules, joint fail-closed track logic, and named failure taxonomy;
-fixture identity, hashing, and integrity rules; trial lifecycle, eligibility,
-success criteria, and sample/stopping policy; the comparison hierarchy and
-allowable claims; privacy, raw-data integrity, and secret-handling rules; all
-Phase 2 promotion gates (manual waveform agreement, bounded calibration,
-independent review) and the prohibition on creating
-`bench/measurement_profile.json` before a manually confirmed, independently
-reviewed live GO.
+candidate structure and its bounded calibration rules; the Window A–D
+definitions, thresholds, and fail-closed discipline; fixture identity,
+hashing, and integrity rules for the canonical fixture; trial lifecycle,
+eligibility, success criteria, and sample/stopping policy; the comparison
+hierarchy and allowable claims; privacy, raw-data integrity, and
+secret-handling rules; all Phase 2 promotion gates (manual waveform
+agreement, bounded calibration, independent review) and the prohibition on
+creating `bench/measurement_profile.json` before a manually confirmed,
+independently reviewed live GO.
 
-**Review requirements before any live use.** (1) Methodology review of this
-amendment and the specification; (2) offline validation of the harness
-control loop and analysis reuse against the existing test suite's standards;
-(3) a separately authorized bounded live attempt under the same
-teardown-and-evidence discipline as attempts 1–26.
+**Review requirements before any live use.** (1) Final methodology review of
+this revision and the specification; (2) offline validation of the harness
+control loop and analysis reuse to the existing suite's standards, including
+the specification's required adversarial cases; (3) the Section 7
+calibration captures under the SIP topology (no-stimulus, stimulus-echo,
+agent-only) before any detector freeze; (4) a separately authorized bounded
+live attempt under the same teardown-and-evidence discipline as attempts
+1–26.
