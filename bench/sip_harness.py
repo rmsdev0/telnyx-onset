@@ -58,16 +58,21 @@ MAX_RX_VOID_TOTAL_NS = 1_000_000_000
 WATERMARK_STALL_BOUND_NS = 2_000_000_000
 DELIVERY_CONFIRMATION_TIMEOUT_NS = 2_000_000_000
 CONTROL_OBSERVATION_NS = 10_000_000_000
+PHASE3_BARGE_OFFSET_NS = 1_000_000_000
+PHASE3_NATURAL_END_NS = 3_200_000_000
 MAX_RECORDED_SAMPLES_8K = (60 + 10) * SAMPLE_RATE_8K
 DECIMATION_RULE = "hamming63_lowpass3400_group_delay_compensated_decimate2"
 
-CaptureMode = Literal["measurement", "no-stimulus", "echo-control", "agent-only"]
+CaptureMode = Literal[
+    "measurement", "no-stimulus", "echo-control", "agent-only", "phase3"
+]
 _SUCCESS_OUTCOMES = frozenset(
     {
         "capture_complete_pending_review",
         "control_no_stimulus_complete_pending_review",
         "control_echo_complete_pending_review",
         "control_agent_only_complete_pending_review",
+        "phase3_capture_complete_pending_classification",
     }
 )
 
@@ -228,6 +233,10 @@ class SipSessionConfig:
     separating_silence_ns: int = SEPARATING_SILENCE_NS
     echo_search_ms: int = ECHO_SEARCH_MS
     control_observation_ns: int = CONTROL_OBSERVATION_NS
+    phase3_trial_id: str = ""
+    phase3_condition: str = ""
+    barge_offset_ns: int = PHASE3_BARGE_OFFSET_NS
+    natural_end_ns: int = PHASE3_NATURAL_END_NS
 
     def __post_init__(self) -> None:
         if self.mode not in {
@@ -235,12 +244,23 @@ class SipSessionConfig:
             "no-stimulus",
             "echo-control",
             "agent-only",
+            "phase3",
         }:
             raise ValueError("unsupported capture mode")
         if self.control_observation_ns <= 0:
             raise ValueError("control observation duration must be positive")
         if self.attempt_number <= 0:
             raise ValueError("attempt number must be positive")
+        if self.mode == "phase3":
+            if not self.phase3_trial_id.startswith(("p3q-", "p3f-")):
+                raise ValueError("phase3 trial id is required")
+            if self.phase3_condition not in {
+                "onset-fd-vad",
+                "onset-fd-transcript",
+            }:
+                raise ValueError("phase3 condition is invalid")
+            if self.barge_offset_ns <= 0 or self.natural_end_ns <= 0:
+                raise ValueError("phase3 timing values must be positive")
 
 
 _SILENCE_PCMU_FRAME = encode_pcm16_to_pcmu(bytes(PCM16_8K_FRAME_BYTES))
@@ -340,6 +360,7 @@ class SipSession:
         self._tx_index = 0
         self._tx_start_ns: int | None = None
         self._fixture_armed = False
+        self._stimulus_scheduled_ns: int | None = None
         self._fixture_frame_next = 0
         self.emission_boundary_ns: int | None = None
         self.emission_boundary_tx_sample: int | None = None
@@ -555,7 +576,7 @@ class SipSession:
             self._fail(self._cap_category(), now_ns)
             return
         if (
-            self.config.mode in {"measurement", "echo-control"}
+            self.config.mode in {"measurement", "echo-control", "phase3"}
             and self.fixture_end_ns is not None
             and not self._delivery_confirmed
             and now_ns - self.fixture_end_ns >= DELIVERY_CONFIRMATION_TIMEOUT_NS
@@ -590,7 +611,7 @@ class SipSession:
             )
             return
         if (
-            self.config.mode == "measurement"
+            self.config.mode in {"measurement", "phase3"}
             and self.fixture_end_ns is not None
             and self._separation_confirmed_ns is None
             and now_ns
@@ -733,7 +754,10 @@ class SipSession:
     # ------------------------------------------------------------ analysis
 
     def _cap_category(self) -> str:
-        if self.config.mode != "measurement" and self.greeting_stop_ns is not None:
+        if (
+            self.config.mode not in {"measurement", "phase3"}
+            and self.greeting_stop_ns is not None
+        ):
             return "capture_limit_reached"
         if self.emission_boundary_ns is not None:
             return "post_stimulus_response_not_observed"
@@ -847,11 +871,31 @@ class SipSession:
                             self.anchor_ns,
                             sample_16k=self.anchor_sample_16k,
                         )
+                        if self.config.mode == "phase3":
+                            self._stimulus_scheduled_ns = (
+                                self.anchor_ns + self.config.barge_offset_ns
+                            )
+                            self._event(
+                                "stimulus_scheduled",
+                                host_ns,
+                                scheduled_host_ns=self._stimulus_scheduled_ns,
+                                barge_offset_ms=self.config.barge_offset_ns
+                                // 1_000_000,
+                            )
                 else:
                     self._run_start_window = None
                     self._run_windows = 0
                 continue
             if self.greeting_stop_ns is None:
+                if (
+                    self.config.mode == "phase3"
+                    and self._stimulus_scheduled_ns is not None
+                    and host_ns >= self._stimulus_scheduled_ns
+                    and not self._fixture_armed
+                    and self.emission_boundary_ns is None
+                ):
+                    self._fixture_armed = True
+                    self._event("stimulus_armed", host_ns)
                 if active:
                     self._silence_start_window = None
                 elif silent:
@@ -876,9 +920,12 @@ class SipSession:
                             self._silence_start_window
                         ][0]
                         self._event(
-                            "agent_natural_stop_confirmed",
+                            "harness_acoustic_stop_confirmed"
+                            if self.config.mode == "phase3"
+                            else "agent_natural_stop_confirmed",
                             now_ns,
                             backdated_sample_16k=stop_sample,
+                            boundary_host_ns=self.greeting_stop_ns,
                         )
                         if self.config.mode == "agent-only":
                             self.outcome = (
@@ -1013,8 +1060,12 @@ class SipSession:
         if match is not None:
             self._fail("post_stimulus_echo_detected", now_ns)
             return
-        self.outcome = "capture_complete_pending_review"
-        self._event("capture_completed", now_ns)
+        if self.config.mode == "phase3":
+            self.outcome = "phase3_capture_complete_pending_classification"
+            self._event("phase3_capture_completed", now_ns)
+        else:
+            self.outcome = "capture_complete_pending_review"
+            self._event("capture_completed", now_ns)
 
     def _prepare_no_stimulus_snapshot(self, now_ns: int) -> None:
         if (
@@ -1132,6 +1183,17 @@ class SipSession:
                 return offset // 2
         return len(self._rx_16k) // 2
 
+    def _agent_active_at(self, host_ns: int | None) -> bool:
+        if host_ns is None:
+            return False
+        preceding = [
+            rms for frame_host, rms in self._rx_frame_rms if frame_host <= host_ns
+        ]
+        return bool(
+            preceding
+            and preceding[-1] >= self.config.detector.activity_threshold_dbfs
+        )
+
     # ------------------------------------------------------------ teardown
 
     def finalize(
@@ -1170,6 +1232,9 @@ class SipSession:
         emitted = self.config.emitted
         successful = self.outcome in _SUCCESS_OUTCOMES
         gate_outcome = (
+            "QUALIFICATION_CAPTURE_COMPLETE_PENDING_CLASSIFICATION"
+            if self.outcome == "phase3_capture_complete_pending_classification"
+            else
             "CAPTURE_COMPLETE_PENDING_REVIEW"
             if self.outcome == "capture_complete_pending_review"
             else (
@@ -1261,7 +1326,8 @@ class SipSession:
             ],
             "tx_delivery_counters": self.delivery_counters,
             "tx_delivery_evidence": {
-                "required": self.config.mode in {"measurement", "echo-control"},
+                "required": self.config.mode
+                in {"measurement", "echo-control", "phase3"},
                 "confirmed": self._delivery_confirmed,
                 "required_packets": len(emitted.pcmu_frames),
                 "required_bytes": len(emitted.pcmu_frames) * PCMU_FRAME_BYTES,
@@ -1278,7 +1344,11 @@ class SipSession:
                     "observation_ms": self.config.control_observation_ns
                     // 1_000_000,
                 }
-                if self.config.mode != "measurement"
+                if self.config.mode
+                not in {
+                    "measurement",
+                    "phase3",
+                }
                 else None
             ),
             "emission_boundary_tx_sample_8k": self.emission_boundary_tx_sample,
@@ -1286,6 +1356,38 @@ class SipSession:
             "clock_process_id": os.getpid(),
             "mapping_error_budget_ms": 80,
         }
+        if self.config.mode == "phase3":
+            natural_deadline = (
+                None
+                if self.anchor_ns is None
+                else self.anchor_ns + self.config.natural_end_ns
+            )
+            manifest["phase3"] = {
+                "trial_id": self.config.phase3_trial_id,
+                "condition": self.config.phase3_condition,
+                "barge_offset_ms": self.config.barge_offset_ns // 1_000_000,
+                "natural_end_reference_ms": self.config.natural_end_ns // 1_000_000,
+                "natural_end_reference_run_id": "p2-1de191a7ca4e9f33",
+                "stimulus_scheduled_host_ns": self._stimulus_scheduled_ns,
+                "stimulus_start_host_ns": self.emission_boundary_ns,
+                "agent_audio_active_at_stimulus": self._agent_active_at(
+                    self.emission_boundary_ns
+                ),
+                "acoustic_stop_host_ns": self.greeting_stop_ns,
+                "natural_end_deadline_host_ns": natural_deadline,
+                "stop_before_natural_end": (
+                    self.greeting_stop_ns is not None
+                    and natural_deadline is not None
+                    and self.greeting_stop_ns < natural_deadline
+                ),
+                "harness_boundary_latency_ms": (
+                    None
+                    if self.emission_boundary_ns is None
+                    or self.greeting_stop_ns is None
+                    else (self.greeting_stop_ns - self.emission_boundary_ns)
+                    / 1_000_000
+                ),
+            }
         if extra:
             manifest.update(extra)
         self.artifacts.write_json("manifest.json", manifest)
@@ -1388,7 +1490,13 @@ def main() -> None:
     parser.add_argument("--fixture", type=_Path)
     parser.add_argument(
         "--mode",
-        choices=("measurement", "no-stimulus", "echo-control", "agent-only"),
+        choices=(
+            "measurement",
+            "no-stimulus",
+            "echo-control",
+            "agent-only",
+            "phase3",
+        ),
         default="measurement",
     )
     parser.add_argument("--attempt-number", type=int, default=1)
@@ -1402,6 +1510,14 @@ def main() -> None:
     parser.add_argument("--silence-threshold-dbfs", type=float, default=-45.0)
     parser.add_argument("--minimum-active-ms", type=int, default=100)
     parser.add_argument("--sustained-silence-ms", type=int, default=500)
+    parser.add_argument("--phase3-trial-id", default="")
+    parser.add_argument(
+        "--phase3-condition",
+        choices=("onset-fd-vad", "onset-fd-transcript"),
+        default="onset-fd-vad",
+    )
+    parser.add_argument("--barge-offset-ms", type=int, default=1000)
+    parser.add_argument("--natural-end-ms", type=int, default=3200)
     arguments = parser.parse_args()
     if not arguments.live:
         print("offline safety gate: no call placed; run the offline test suite")
@@ -1474,6 +1590,10 @@ def main() -> None:
             mode=arguments.mode,
             attempt_number=arguments.attempt_number,
             detector=detector,
+            phase3_trial_id=arguments.phase3_trial_id,
+            phase3_condition=arguments.phase3_condition,
+            barge_offset_ns=arguments.barge_offset_ms * 1_000_000,
+            natural_end_ns=arguments.natural_end_ms * 1_000_000,
         ),
         artifacts,
         dial_requested_ns=time.monotonic_ns(),

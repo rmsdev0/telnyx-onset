@@ -19,6 +19,7 @@ from bench.acoustic_probe import (
     decode_pcmu_8k_to_pcm16_16k,
     match_fixture_reference,
 )
+from bench.acoustic_stop import DetectorConfig
 from bench.media_capture import ArtifactDirectory, new_run_id
 from bench.sip_harness import (
     FRAME_MS,
@@ -65,6 +66,20 @@ def _session(
         emitted=derive_emission_fixture(fixture),
         mode=mode,
         control_observation_ns=control_observation_ns,
+        detector=(
+            DetectorConfig(
+                activity_threshold_dbfs=-42,
+                silence_threshold_dbfs=-42,
+                minimum_active_ms=100,
+                sustained_silence_ms=300,
+            )
+            if mode == "phase3"
+            else DetectorConfig()
+        ),
+        phase3_trial_id="p3q-001" if mode == "phase3" else "",
+        phase3_condition="onset-fd-vad" if mode == "phase3" else "",
+        barge_offset_ns=100_000_000,
+        natural_end_ns=3_200_000_000,
     )
     artifacts = ArtifactDirectory(tmp_path, new_run_id())
     return SipSession(config, artifacts, dial_requested_ns=1_000)
@@ -220,6 +235,36 @@ def test_happy_path_completes_pending_review(tmp_path: Path) -> None:
     with wave.open(str(session.artifacts.path / "tx_8k.wav")) as wav:
         assert wav.getframerate() == 8_000
         assert wav.getnframes() > 0
+
+
+def test_phase3_emits_during_active_audio_and_records_acoustic_stop(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path, mode="phase3")
+    driver = Driver(session)
+    driver.answer()
+    driver.run(12, LOUD_8K)
+    assert session.emission_boundary_ns is not None
+    assert session.greeting_stop_ns is None
+    driver.run(20, QUIET_8K)
+    assert session.greeting_stop_ns is not None
+    assert session.emission_boundary_ns < session.greeting_stop_ns
+    driver.run(10, LOUD_8K)
+    driver.run(300, QUIET_8K)
+    assert session.outcome == "phase3_capture_complete_pending_classification"
+
+    session.finalize(teardown_result="hangup_sent", now_ns=driver.now_ns)
+    manifest = json.loads((session.artifacts.path / "manifest.json").read_text())
+    assert (
+        manifest["gate_outcome"]
+        == "QUALIFICATION_CAPTURE_COMPLETE_PENDING_CLASSIFICATION"
+    )
+    assert manifest["capture_mode"] == "phase3"
+    assert manifest["tx_delivery_evidence"]["required"] is True
+    assert manifest["phase3"]["trial_id"] == "p3q-001"
+    assert manifest["phase3"]["agent_audio_active_at_stimulus"] is True
+    assert manifest["phase3"]["stop_before_natural_end"] is True
+    assert manifest["phase3"]["harness_boundary_latency_ms"] > 0
 
 
 def test_response_with_internal_pause_still_completes(tmp_path: Path) -> None:

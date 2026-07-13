@@ -97,10 +97,11 @@ taxonomy without replacing failed attempts. Formal qualification still
 requires a clean committed revision and separately authorized bounded live
 calls through the common SIP boundary.
 
-The prospective qualification manifest is frozen at
-`bench/phase3_qualification_manifest.json`: seed `20260713`, 10 attempted trials
-per primary condition, balanced in four-trial blocks, with no replacement of
-failed attempts.
+The initial prospective manifest was superseded before any call because its
+preflight exposed a Phase 2/Phase 3 scheduling mismatch. The corrected Phase 3
+harness emits 1,000 ms into confirmed active playback and uses the 3,200 ms
+frozen natural-end reference derived from the agent-only control. A replacement
+manifest must be frozen from the corrected clean revision before live calls.
 
 ## Phase 3 scope
 

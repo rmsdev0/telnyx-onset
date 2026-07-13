@@ -97,6 +97,9 @@ def test_formal_manifest_records_commit_profile_and_attempts() -> None:
     assert len(manifest["trials"]) == 20  # type: ignore[arg-type]
     assert manifest["git"]["commit"]  # type: ignore[index]
     assert manifest["measurement_profile"]["sha256"]  # type: ignore[index]
+    protocol = manifest["qualification_protocol"]
+    assert protocol["barge_offset_ms"] == 1_000  # type: ignore[index]
+    assert protocol["natural_end_reference_ms"] == 3_200  # type: ignore[index]
 
 
 def test_evidence_file_is_write_once(tmp_path: Path) -> None:

@@ -28,6 +28,9 @@ PRIMARY_CONDITIONS = (
 DEFAULT_ORDER_BLOCK_PER_CONDITION = 2
 QUALIFICATION_ATTEMPTS_PER_CONDITION = 10
 FINAL_ATTEMPTS_PER_CONDITION = 40
+PHASE3_BARGE_OFFSET_MS = 1_000
+PHASE3_NATURAL_END_MS = 3_200
+PHASE3_NATURAL_END_RUN_ID = "p2-1de191a7ca4e9f33"
 
 
 class FailureCode(StrEnum):
@@ -246,6 +249,15 @@ def build_manifest(
             "sha256": _sha256_file(profile_path),
         },
         "matched_difference": "trigger eligibility only",
+        "qualification_protocol": {
+            "harness_mode": "phase3",
+            "barge_offset_ms": PHASE3_BARGE_OFFSET_MS,
+            "natural_end_reference_ms": PHASE3_NATURAL_END_MS,
+            "natural_end_reference_run_id": PHASE3_NATURAL_END_RUN_ID,
+            "natural_end_derivation": (
+                "frozen detector reanalysis: samples 104960..156160 at 16 kHz"
+            ),
+        },
         "trials": trials,
     }
 

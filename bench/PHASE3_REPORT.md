@@ -1,7 +1,7 @@
 # Phase 3 execution report
 
-**Status:** runtime implemented, offline-qualified, and prospectively ordered;
-formal live qualification not started.
+**Status:** runtime and mid-playback SIP qualification path implemented and
+offline-qualified; formal live qualification not started.
 
 Runtime revision: `ee99b481860e452f2d89a189d6e15194d3afcc2e`.
 
@@ -53,13 +53,21 @@ The complete repository gate passes with 225 tests, Ruff, and strict mypy over
 
 ## Prospective qualification order
 
-`bench/phase3_qualification_manifest.json` freezes seed `20260713` and 20
-attempted trials (10 per primary condition) in balanced blocks. It records the
-clean runtime revision and exact measurement-profile hash. Failed attempts will
-not be replaced. Qualification evidence remains excluded from final analysis.
+The first seed-`20260713` manifest was superseded before any call after a
+preflight audit found that the Phase 2 SIP measurement mode emits its fixture
+after natural greeting stop. No qualification evidence was collected with that
+invalid path. The corrected `phase3` harness mode schedules the fixture 1,000 ms
+after the frozen detector confirms active playback, measures the subsequent
+acoustic stop, and records whether it precedes the frozen natural end.
 
-No Phase 3 provider call has been placed. The next irreversible/cost-bearing
-step is to commit the runtime revision, create the prospective qualification
-manifest, then run the bounded interleaved qualification attempts through the
-approved SIP harness. Final collection remains prohibited until qualification
-passes without profile tuning.
+The natural-end reference is 3,200 ms from active onset: frozen-profile
+reanalysis of agent-only capture `p2-1de191a7ca4e9f33`, samples
+104,960–156,160 at 16 kHz. A replacement prospective manifest will be generated
+from the clean corrected revision before any provider call. Failed attempts
+will not be replaced, and qualification remains excluded from final analysis.
+
+No Phase 3 provider call has been placed. The restore-safe live runner launches
+one fail-closed agent process per scheduled trial, preserves agent/harness
+evidence together, restores the external webhook in a `finally` path, and
+classifies every scheduled attempt without replacement. Final collection
+remains prohibited until qualification passes without profile tuning.
