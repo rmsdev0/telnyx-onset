@@ -491,11 +491,20 @@ the prohibited sense: no captured waveform is modified, every measured sample
 remains provider-delivered media, and an idle caller line transmitting
 silence models the pre-registered scenario more faithfully than a dead
 endpoint. The methodology-sensitive distinction is recorded here explicitly
-for independent review. Open unknowns: whether adding a bidirectional stream
-to the probe leg suppresses its receive-only stream's outbound track
-(attempts 10 and 11 saw zero outbound frames on a solely-bidirectional probe
-socket), and whether the monitor outbound track streams delivered audio in
-practice.
+for independent review. Attempt 26 resolved both open unknowns negatively:
+with the caller line demonstrably transmitting, the monitor's outbound track
+still delivered zero frames, and the probe leg's measured receive-only
+outbound track collapsed to a single frame. Together with attempts 10, 11,
+22, and 24, the provider rule on this account/topology is that a leg carrying
+any bidirectional stream exposes no usable outbound track on any of its
+streams, while every agent-leg inbound surface mirrors the websocket
+injection. The production agent cannot give up its bidirectional stream, so
+no measured channel B can exist on the agent leg, and holding the caller line
+open destroys channel A on the probe leg. The Call Control media-streaming
+surface is therefore exhausted for the plan's channel-separation requirement;
+proceeding requires a Telnyx-side correction or the separately approved
+benchmark redesign (an external SIP media-endpoint harness that terminates
+media locally and captures both directions on one host clock).
 
 ## Live attempt log
 
@@ -759,6 +768,22 @@ practice.
   gating it, and injection begins on StartFrame receipt. No measured-channel
   gate was weakened.
 
+- 2026-07-12, authorized iterative attempt 26 (`target_legs=opposite`, revision
+  `875882e`): **NO-GO — `agent_audio_not_observed`**. The caller-line
+  keepalive operated as designed: the keeper connected, reported the expected
+  PCMU leg context sanitized, and injected paced true silence for the whole
+  run — the probe leg's diagnostic inbound carried its entry mirror
+  continuously. Two determinations followed. First, the monitor's outbound
+  track still delivered zero frames despite continuous caller-line audio
+  delivered toward the agent leg. Second, the probe leg's measured
+  receive-only outbound track collapsed from hundreds of frames in attempts
+  22 and 24 to a single frame, extending the attempts-10/11 finding:
+  attaching a bidirectional stream to a leg suppresses outbound-track
+  delivery for every stream on that leg. No fixture was armed. Both legs were
+  hung up, exact webhook restoration was verified, and the tunnel was
+  stopped. This empirically rejects the caller-line keepalive and, with it,
+  the last plan-compatible Call Control media-streaming topology.
+
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
 diagnostic WAVs under the documented exception. No mapped promotion track WAVs,
@@ -799,6 +824,8 @@ comparative results, or measurement profile were produced.
 - [x] One authorized opposite-target full-transport attempt retained.
 - [x] One authorized monitor-topology format attempt retained.
 - [x] One authorized monitor-coverage attempt retained.
+- [x] One authorized keeper-format attempt retained.
+- [x] One authorized caller-line keepalive attempt retained.
 - [ ] Manual waveform agreement.
 - [ ] Completed bounded calibration.
 - [ ] Stable two-track live capture and separation.
