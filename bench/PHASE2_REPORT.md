@@ -745,6 +745,20 @@ practice.
   tunnel was stopped. The caller-line keepalive correction described above was
   then prepared for review.
 
+- 2026-07-12, authorized iterative attempt 25 (`target_legs=opposite`, revision
+  `a6cc1f7`): **NO-GO — `media_format_mismatch`**. The first caller-line
+  keepalive call. The agent, monitor, and probe sockets all validated their
+  exact formats, but the keeper socket's StartFrame failed its L16 gate before
+  injection began: the probe leg reports its PCMU media context on an attached
+  stream's start, and the keeper's gate had assumed the bidirectional L16
+  request would be reflected there. That start format describes only the
+  keeper's discarded inbound track — the injection format is fixed by the
+  explicit `stream_bidirectional_*` request — so gating it was unnecessary
+  strictness on an unmeasured surface. No fixture was armed; both legs were
+  hung up. The keeper now records the observed start format sanitized without
+  gating it, and injection begins on StartFrame receipt. No measured-channel
+  gate was weakened.
+
 The original maximum-three-attempt policy was exhausted; attempt 4 used a fresh
 explicit authorization. Attempt 9 additionally produced bounded ignored local
 diagnostic WAVs under the documented exception. No mapped promotion track WAVs,

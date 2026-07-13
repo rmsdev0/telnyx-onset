@@ -2926,11 +2926,22 @@ def create_app(
                         validate_authorized_call_id(
                             event.call_control_id, authorization.call_control_id
                         )
-                        validate_media_format(
-                            event.media_format,
-                            encoding="L16",
-                            sample_rate=SAMPLE_RATE,
-                            channels=CHANNELS,
+                        # The keeper's start format describes its discarded
+                        # inbound track, not the injection: the injected
+                        # audio's format is fixed by the explicit
+                        # stream_bidirectional_* request. Attempt 25 failed
+                        # closed gating this irrelevant value, so it is
+                        # recorded sanitized but not gated.
+                        controller.artifacts.append_jsonl(
+                            "events.jsonl",
+                            {
+                                "event": "media_format_observed",
+                                "role": "keeper",
+                                "media_format": asdict(event.media_format),
+                                "host_monotonic_ns": (
+                                    event.host_receive_monotonic_ns
+                                ),
+                            },
                         )
                         if silence_task is None:
                             silence_task = asyncio.create_task(

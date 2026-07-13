@@ -1663,7 +1663,10 @@ def test_keeper_route_streams_paced_true_silence(tmp_path: Path) -> None:
             f"/ws/keeper/{controller.run_id}",
             headers={"x-telnyx-streaming-auth-token": token},
         ) as ws:
-            ws.send_text(start_raw("route-call"))
+            # The keeper tolerates any start format (attempt 25: leg A reports
+            # its PCMU context, which describes only the discarded inbound
+            # track and not the explicit L16 bidirectional injection).
+            ws.send_text(start_raw("route-call", encoding="PCMU", sample_rate=8_000))
             frames = [json.loads(ws.receive_text()) for _ in range(3)]
             for frame in frames:
                 assert frame["event"] == "media"
@@ -1679,6 +1682,9 @@ def test_keeper_route_streams_paced_true_silence(tmp_path: Path) -> None:
         assert not controller.keeper_socket_active
         events = (controller.artifacts.path / "events.jsonl").read_text()
         assert '"caller_line_keepalive_started"' in events
+        assert '"role":"keeper"' in events
+        assert '"encoding":"PCMU"' in events
+        assert "route-call" not in events
 
 
 def test_monitor_route_measures_only_outbound_l16(tmp_path: Path) -> None:
