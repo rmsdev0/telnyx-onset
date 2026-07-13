@@ -466,6 +466,22 @@ class SipSession:
     def set_delivery_counters(self, counters: dict[str, object]) -> None:
         self.delivery_counters = dict(counters)
 
+    def report_rx_loss(self, packets: int, now_ns: int) -> None:
+        """Stream-stat loss reported by the media layer.
+
+        The pull/push port surface has no per-packet RTP headers, so the
+        adapter polls stack stream statistics and reports increases here;
+        loss once the measured windows have begun fails closed.
+        """
+        if packets <= 0:
+            return
+        self.rx_counters["reported_loss"] = (
+            int(self.rx_counters.get("reported_loss", 0)) + packets
+        )
+        self._event("rx_stream_loss_reported", now_ns, packets=packets)
+        if self.anchor_ns is not None:
+            self._fail("rx_timeline_discontinuity", now_ns)
+
     # ------------------------------------------------------------ analysis
 
     def _cap_category(self) -> str:
@@ -639,7 +655,13 @@ class SipSession:
 
     # ------------------------------------------------------------ teardown
 
-    def finalize(self, *, teardown_result: str, now_ns: int) -> None:
+    def finalize(
+        self,
+        *,
+        teardown_result: str,
+        now_ns: int,
+        extra: dict[str, object] | None = None,
+    ) -> None:
         if self.teardown_result is None:
             self.teardown_result = teardown_result
         self._write_wav("rx_8k.wav", bytes(self._rx_pcmu), source="pcmu")
@@ -702,6 +724,8 @@ class SipSession:
             "emission_boundary_tx_sample_8k": self.emission_boundary_tx_sample,
             "clock": "time.monotonic_ns",
         }
+        if extra:
+            manifest.update(extra)
         self.artifacts.write_json("manifest.json", manifest)
         self._event("teardown_recorded", now_ns, teardown_result=self.teardown_result)
 
@@ -744,6 +768,14 @@ def _build_pcmu_decode_table() -> tuple[int, ...]:
 _PCMU_DECODE_TABLE = _build_pcmu_decode_table()
 
 
+def decode_pcmu_to_pcm16_8k(payload: bytes) -> bytes:
+    """Plain G.711 expansion at 8 kHz (no zero-order hold)."""
+    out = array("h", (0 for _ in range(len(payload))))
+    for index, byte in enumerate(payload):
+        out[index] = _PCMU_DECODE_TABLE[byte]
+    return out.tobytes()
+
+
 def write_emitted_fixture_wav(emitted: EmittedFixture, path: Path) -> None:
     """Persist the derived emission fixture for calibration review."""
     with wave.open(str(path), "wb") as wav:
@@ -751,3 +783,102 @@ def write_emitted_fixture_wav(emitted: EmittedFixture, path: Path) -> None:
         wav.setsampwidth(2)
         wav.setframerate(SAMPLE_RATE_8K)
         wav.writeframes(emitted.pcm16_8k)
+
+
+def _run_live_preflight() -> None:
+    """Refuse dialing unless ignore, tests, lint, and types are clean."""
+    import subprocess
+    import sys
+
+    from bench.acoustic_probe import ARTIFACT_ROOT, REPOSITORY_ROOT
+
+    checks = (
+        (
+            ["git", "check-ignore", "-q", f"{ARTIFACT_ROOT}{os.sep}"],
+            "artifact ignore rule",
+        ),
+        ([sys.executable, "-m", "pytest", "-q"], "offline tests"),
+        ([sys.executable, "-m", "ruff", "check", "onset/", "bench/", "tests/"], "Ruff"),
+        ([sys.executable, "-m", "mypy", "onset/", "bench/", "tests/"], "mypy"),
+    )
+    for command, label in checks:
+        result = subprocess.run(command, check=False, cwd=REPOSITORY_ROOT)
+        if result.returncode != 0:
+            raise SystemExit(f"live preflight failed: {label}")
+
+
+def main() -> None:
+    import argparse
+    import time
+    from pathlib import Path as _Path
+
+    from bench.acoustic_probe import (
+        ARTIFACT_ROOT,
+        load_fixture,
+        validate_artifact_root,
+    )
+    from bench.media_capture import ArtifactDirectory, new_run_id
+
+    parser = argparse.ArgumentParser(description="SIP media-endpoint harness")
+    parser.add_argument(
+        "--live", action="store_true", help="allow one bounded live attempt"
+    )
+    parser.add_argument("--fixture", type=_Path)
+    arguments = parser.parse_args()
+    if not arguments.live:
+        print("offline safety gate: no call placed; run the offline test suite")
+        return
+    if os.environ.get("BENCH_LIVE") != "1":
+        raise SystemExit("live gate closed: BENCH_LIVE=1 is also required")
+    if arguments.fixture is None:
+        raise SystemExit("--fixture is required for live mode")
+    required = {
+        name: os.environ.get(name, "")
+        for name in (
+            "BENCH_SIP_USERNAME",
+            "BENCH_SIP_PASSWORD",
+            "BENCH_SIP_DOMAIN",
+            "BENCH_SIP_CALLER_ID",
+            "BENCH_AGENT_NUMBER",
+        )
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise SystemExit(
+            "missing required trusted live configuration: " + ", ".join(missing)
+        )
+    fixture = load_fixture(arguments.fixture)
+    emitted = derive_emission_fixture(fixture)
+    _run_live_preflight()
+    artifacts = ArtifactDirectory(
+        validate_artifact_root(ARTIFACT_ROOT), new_run_id()
+    )
+    write_emitted_fixture_wav(emitted, artifacts.path / "emitted_fixture_8k.wav")
+    print(
+        "live configuration accepted: one attempt, 60-second hard cap, "
+        f"fixture_sha256={fixture.sha256}, emitted_sha256={emitted.sha256}"
+    )
+    from bench.sip_media_pjsua import run_live_call
+
+    session = SipSession(
+        SipSessionConfig(fixture=fixture, emitted=emitted),
+        artifacts,
+        dial_requested_ns=time.monotonic_ns(),
+    )
+    run_live_call(
+        session,
+        sip_username=required["BENCH_SIP_USERNAME"],
+        sip_password=required["BENCH_SIP_PASSWORD"],
+        sip_domain=required["BENCH_SIP_DOMAIN"],
+        caller_id=required["BENCH_SIP_CALLER_ID"],
+        agent_number=required["BENCH_AGENT_NUMBER"],
+    )
+    print(
+        "terminal outcome: "
+        f"{session.outcome} teardown={session.teardown_result} "
+        f"artifacts={artifacts.path.name}"
+    )
+
+
+if __name__ == "__main__":
+    main()

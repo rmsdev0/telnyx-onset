@@ -49,8 +49,9 @@ python_version = "3.12"
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["webrtcvad", "miniaudio"]
+module = ["webrtcvad", "miniaudio", "pjsua2"]
 ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
