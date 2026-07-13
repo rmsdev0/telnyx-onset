@@ -204,14 +204,14 @@ recorded alongside — never subtracted from — the headline metric.
   `stream_start_failed`, `media_format_mismatch`, `media_ordering_anomaly`,
   `agent_audio_not_observed`, `natural_stop_not_observed`,
   `stimulus_send_failed`, `stimulus_overlap`,
-  `post_stimulus_response_not_observed`, `capture_limit_reached`,
-  `socket_error`, `call_hangup`, `teardown_timeout`.
+  `stimulus_boundary_ambiguous` (continuous rx activity after the fixture
+  leaves no defensible Window C/D split), `post_stimulus_response_not_observed`,
+  `capture_limit_reached`, `socket_error`, `call_hangup`, `teardown_timeout`.
 - **Retired as structurally unreachable** (single empirical channel plus
   deterministic reference): `track_ambiguous`, `track_missing`,
   `fixture_match_missing`, `fixture_match_ambiguous`,
-  `cross_channel_alignment_failed`, `stimulus_boundary_ambiguous`,
-  `stream_auth_failed`, `stream_call_id_mismatch`,
-  `stimulus_transport_pending`.
+  `cross_channel_alignment_failed`, `stream_auth_failed`,
+  `stream_call_id_mismatch`, `stimulus_transport_pending`.
 - **New:** `rx_timeline_discontinuity`, `post_stimulus_echo_detected`.
 
 ## 7. Reused components (unchanged)
