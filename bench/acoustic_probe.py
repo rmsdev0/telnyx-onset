@@ -409,6 +409,40 @@ async def send_fixture_paced(
     )
 
 
+async def send_silence_paced(
+    sender: TextSender,
+    *,
+    clock: MonotonicClock,
+    frame_ms: int = FRAME_MS,
+) -> None:
+    """Transmit an open caller line: paced true-silence frames until cancelled.
+
+    A Call Control-answered leg emits no RTP at all (attempt 24), so nothing
+    is bridged toward the agent leg and delivery-gated tracks starve. This
+    models a real caller holding an open, quiet line; it never touches a
+    captured waveform.
+    """
+    period_ns = frame_ms * 1_000_000
+    message = json.dumps(
+        {
+            "event": "media",
+            "media": {
+                "payload": base64.b64encode(bytes(L16_FRAME_BYTES)).decode("ascii")
+            },
+        },
+        separators=(",", ":"),
+    )
+    origin = clock.monotonic_ns()
+    index = 0
+    while True:
+        deadline = origin + index * period_ns
+        remaining_ns = deadline - clock.monotonic_ns()
+        if remaining_ns > 0:
+            await asyncio.sleep(remaining_ns / 1_000_000_000)
+        await sender.send_text(message)
+        index += 1
+
+
 @dataclass(frozen=True, slots=True)
 class BenchConfig:
     settings: Settings
@@ -571,6 +605,8 @@ class ProbeController:
         self.probe_socket_active = False
         self.agent_socket_active = False
         self.monitor_socket_active = False
+        self.keeper_socket_active = False
+        self.keeper_ready = asyncio.Event()
         self.capture: CrossLegCapture | None = None
         self.agent_integrity: BoundedCapture | None = None
         self.probe_integrity: BoundedCapture | None = None
@@ -924,6 +960,13 @@ class ProbeController:
             ):
                 self.streams_started.add("monitor")
                 await self._start_stream(self.leg_b, role="monitor")
+            if (
+                self.config.probe_receive_only
+                and self.leg_a
+                and "keeper" not in self.streams_started
+            ):
+                self.streams_started.add("keeper")
+                await self._start_stream(self.leg_a, role="keeper")
         elif (
             event_type == "call.hangup"
             and ccid in {self.leg_a, self.leg_b}
@@ -932,7 +975,7 @@ class ProbeController:
             self.fail("call_hangup")
 
     async def _start_stream(
-        self, ccid: str, *, role: Literal["probe", "agent", "monitor"]
+        self, ccid: str, *, role: Literal["probe", "agent", "monitor", "keeper"]
     ) -> None:
         route = role
         token = self.tokens.issue(self.run_id, ccid, route, self.clock.monotonic_ns())
@@ -940,7 +983,8 @@ class ProbeController:
             "stream_url": (
                 f"{self.config.public_wss_base.rstrip('/')}/ws/{route}/{self.run_id}"
             ),
-            "stream_track": "both_tracks",
+            # The keeper only injects caller-line audio; it measures nothing.
+            "stream_track": "inbound_track" if role == "keeper" else "both_tracks",
             "stream_auth_token": token,
         }
         # A monitor stream is receive-only by definition and takes the agent
@@ -959,8 +1003,12 @@ class ProbeController:
                     # On this bridged topology "self" recirculates injected
                     # audio into the leg's own inbound track (attempt 21), so
                     # the target is the explicit --target-legs selection, not
-                    # the production single-leg "self" default.
-                    "stream_bidirectional_target_legs": self.config.target_legs,
+                    # the production single-leg "self" default. The keeper
+                    # exists only to deliver caller-line audio toward the
+                    # bridged agent leg, so its target is always "opposite".
+                    "stream_bidirectional_target_legs": (
+                        "opposite" if role == "keeper" else self.config.target_legs
+                    ),
                 }
             )
         try:
@@ -1102,6 +1150,17 @@ class ProbeController:
                     AGENT_CHANNEL: "agent_leg_provider_inbound",
                 }
             ),
+            "caller_line_keepalive": (
+                {
+                    "codec": "L16",
+                    "sample_rate": SAMPLE_RATE,
+                    "frame_ms": FRAME_MS,
+                    "content": "digital_silence",
+                    "target_legs": "opposite",
+                }
+                if self.config.probe_receive_only
+                else None
+            ),
             "capture_limits": {
                 "call_seconds": self.config.call_seconds,
                 "capture_seconds": self.config.capture_seconds,
@@ -1119,7 +1178,7 @@ async def _authenticate_probe_socket(
     ws: WebSocket,
     controller: ProbeController,
     *,
-    role: Literal["probe", "agent", "monitor"],
+    role: Literal["probe", "agent", "monitor", "keeper"],
 ) -> tuple[StreamAuthorization, ConnectedFrame | None]:
     header_token = ws.headers.get("x-telnyx-streaming-auth-token", "")
     connected: ConnectedFrame | None = None
@@ -2832,6 +2891,88 @@ def create_app(
             with contextlib.suppress(Exception):
                 await ws.close()
 
+    @app.websocket("/ws/keeper/{run_id}")
+    async def keeper_ws(ws: WebSocket, run_id: str) -> None:
+        """Caller-line keepalive injecting paced true silence toward leg B.
+
+        This socket only transmits; nothing it carries is measured or
+        persisted, and its injection mirror lands on the probe leg's
+        diagnostic-only inbound track.
+        """
+        controller: ProbeController = ws.app.state.controller
+        if not hmac.compare_digest(run_id, controller.run_id):
+            await ws.close(code=1008)
+            return
+        if controller.keeper_socket_active:
+            await ws.close(code=1008)
+            return
+        controller.keeper_socket_active = True
+        silence_task: asyncio.Task[None] | None = None
+        message_rows = 0
+        try:
+            authorization, _ = await _authenticate_probe_socket(
+                ws, controller, role="keeper"
+            )
+            async with asyncio.timeout(config.capture_seconds):
+                while True:
+                    raw = await ws.receive_text()
+                    message_rows += 1
+                    if message_rows > MAX_EVENT_ROWS:
+                        raise ProbeProtocolError("capture_limit_reached")
+                    event = decode_probe_message(
+                        raw, controller.clock.monotonic_ns()
+                    )
+                    if isinstance(event, StartFrame):
+                        validate_authorized_call_id(
+                            event.call_control_id, authorization.call_control_id
+                        )
+                        validate_media_format(
+                            event.media_format,
+                            encoding="L16",
+                            sample_rate=SAMPLE_RATE,
+                            channels=CHANNELS,
+                        )
+                        if silence_task is None:
+                            silence_task = asyncio.create_task(
+                                send_silence_paced(ws, clock=controller.clock)
+                            )
+                            controller.keeper_ready.set()
+                            controller.artifacts.append_jsonl(
+                                "events.jsonl",
+                                {
+                                    "event": "caller_line_keepalive_started",
+                                    "host_monotonic_ns": (
+                                        event.host_receive_monotonic_ns
+                                    ),
+                                },
+                            )
+                    elif isinstance(event, ErrorFrame):
+                        raise ProbeProtocolError("socket_error")
+                    elif isinstance(event, StopFrame):
+                        break
+                    # Connected, media, mark, and DTMF frames on this socket
+                    # are intentionally ignored: the keeper measures nothing.
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            # Losing the keeper mid-run starves channel B; the expected
+            # disconnect during post-completion teardown is not a failure.
+            if ProbeState.CAPTURE_COMPLETED not in controller.states:
+                controller.fail("socket_error")
+        except TimeoutError:
+            # The probe socket and watchdog own capture-window classification.
+            pass
+        except ProbeProtocolError as exc:
+            controller.fail(exc.category)
+        except Exception:
+            controller.fail("socket_error")
+        finally:
+            if silence_task is not None:
+                silence_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await silence_task
+            controller.keeper_socket_active = False
+            with contextlib.suppress(Exception):
+                await ws.close()
+
     @app.websocket("/ws/agent/{run_id}")
     async def agent_ws(ws: WebSocket, run_id: str) -> None:
         controller: ProbeController = ws.app.state.controller
@@ -2908,6 +3049,15 @@ def create_app(
                             await controller.measurement_ready.wait()
                     except TimeoutError as exc:
                         raise ProbeProtocolError("stream_start_failed") from exc
+                    if config.probe_receive_only:
+                        # The greeting must not start before the caller line
+                        # is transmitting, or channel B has no coverage for
+                        # the greeting window (attempt 24).
+                        try:
+                            async with asyncio.timeout(STATE_TIMEOUT_SECONDS):
+                                await controller.keeper_ready.wait()
+                        except TimeoutError as exc:
+                            raise ProbeProtocolError("stream_start_failed") from exc
                     media = MediaStream(
                         ws,
                         frame_ms=FRAME_MS,

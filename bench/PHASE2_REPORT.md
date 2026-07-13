@@ -472,16 +472,22 @@ the injected-greeting mirror is a property of the agent leg's media rather
 than of the bidirectional socket: the monitor's inbound track carried the
 identical mirror.
 
-The correction now under review makes the harness behave like a real caller
-with an open line: a second, bidirectional stream on the probe leg injects
-continuously paced true-silence frames with `target_legs=opposite`, so the
-provider continuously delivers genuine caller-side path audio toward the
-agent leg and the monitor's outbound track streams it. Under this shape every
-mirror stays on a diagnostic-only inbound track (probe-leg inbound would
-carry the harness injection's entry mirror; agent-leg inbound carries the
-agent injection's mirror), while both measured channels remain each leg's
-delivered-audio surface. This is not inserted synthetic silence in the
-prohibited sense: no captured waveform is modified, every measured sample
+The implemented correction makes the harness behave like a real caller with
+an open line: a fourth authenticated socket (the keeper) starts a second,
+bidirectional `inbound_track` stream on the probe leg and injects
+continuously paced true-silence L16 frames with a hardcoded
+`target_legs=opposite`, so the provider continuously delivers genuine
+caller-side path audio toward the agent leg and the monitor's delivery-gated
+outbound track has a stream to send. The keeper measures and persists
+nothing; its tokens are route/role-bound like the other sockets, only one
+keeper socket may be active, and the VoiceAgent greeting is gated on the
+keeper actually transmitting so channel B has coverage from the first
+greeting frame. The manifest records the keepalive parameters. Under this
+shape every injection mirror stays on a diagnostic-only inbound track
+(probe-leg inbound carries the keeper's entry mirror; agent-leg inbound
+carries the agent injection's mirror), while both measured channels remain
+each leg's delivered-audio surface. This is not inserted synthetic silence in
+the prohibited sense: no captured waveform is modified, every measured sample
 remains provider-delivered media, and an idle caller line transmitting
 silence models the pre-registered scenario more faithfully than a dead
 endpoint. The methodology-sensitive distinction is recorded here explicitly

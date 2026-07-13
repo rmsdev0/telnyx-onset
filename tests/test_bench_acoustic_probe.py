@@ -472,13 +472,14 @@ async def test_receive_only_probe_omits_all_bidirectional_options(
     await controller.dispatch("call.answered", {"call_control_id": "memory-leg-b"})
     await controller.dispatch("call.bridged", {"call_control_id": "memory-leg-a"})
     streams = [item for item in fake.actions if item[1] == "streaming_start"]
-    assert len(streams) == 3
-    probe_payload = next(
-        payload for ccid, _, payload in streams if ccid == "memory-leg-a"
-    )
+    assert len(streams) == 4
+    leg_a_payloads = [payload for ccid, _, payload in streams if ccid == "memory-leg-a"]
+    assert len(leg_a_payloads) == 2
+    probe_payload, keeper_payload = leg_a_payloads
     leg_b_payloads = [payload for ccid, _, payload in streams if ccid == "memory-leg-b"]
     assert len(leg_b_payloads) == 2
     agent_payload, monitor_payload = leg_b_payloads
+    assert "/ws/probe/" in str(probe_payload["stream_url"])
     assert probe_payload["stream_track"] == "both_tracks"
     assert probe_payload["stream_codec"] == "PCMU"
     assert not any(key.startswith("stream_bidirectional") for key in probe_payload)
@@ -493,6 +494,14 @@ async def test_receive_only_probe_omits_all_bidirectional_options(
     assert "stream_auth_token" in monitor_payload
     assert "/ws/monitor/" in str(monitor_payload["stream_url"])
     assert "token=" not in str(monitor_payload["stream_url"])
+    # The caller-line keeper injects toward the bridged agent leg only.
+    assert "/ws/keeper/" in str(keeper_payload["stream_url"])
+    assert keeper_payload["stream_track"] == "inbound_track"
+    assert keeper_payload["stream_bidirectional_mode"] == "rtp"
+    assert keeper_payload["stream_bidirectional_codec"] == "L16"
+    assert keeper_payload["stream_bidirectional_target_legs"] == "opposite"
+    assert "stream_auth_token" in keeper_payload
+    assert "token=" not in str(keeper_payload["stream_url"])
 
 
 @pytest.mark.asyncio
@@ -509,7 +518,7 @@ async def test_concurrent_bridge_webhooks_start_probe_stream_once(
     starts = 0
 
     async def delayed_start(
-        ccid: str, *, role: Literal["probe", "agent", "monitor"]
+        ccid: str, *, role: Literal["probe", "agent", "monitor", "keeper"]
     ) -> None:
         nonlocal starts
         assert ccid == "memory-leg-a" and role == "probe"
@@ -903,7 +912,7 @@ def probe_media_raw(
 def _route_token(
     controller: ProbeController,
     call_id: str = "route-call",
-    role: Literal["probe", "agent", "monitor"] = "probe",
+    role: Literal["probe", "agent", "monitor", "keeper"] = "probe",
 ) -> str:
     return controller.tokens.issue(
         controller.run_id, call_id, role, controller.clock.monotonic_ns()
@@ -1624,6 +1633,54 @@ def test_monitor_route_rejects_probe_and_agent_tokens(tmp_path: Path) -> None:
         assert controller.failure == "stream_auth_failed"
 
 
+def test_keeper_route_rejects_probe_and_monitor_tokens(tmp_path: Path) -> None:
+    cfg = replace(config(tmp_path), probe_receive_only=True)
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        wrong_roles: tuple[Literal["probe", "monitor"], ...] = ("probe", "monitor")
+        for role in wrong_roles:
+            token = _route_token(controller, role=role)
+            with (
+                pytest.raises(WebSocketDisconnect),
+                client.websocket_connect(
+                    f"/ws/keeper/{controller.run_id}",
+                    headers={"x-telnyx-streaming-auth-token": token},
+                ) as ws,
+            ):
+                ws.receive_text()
+        assert controller.failure == "stream_auth_failed"
+        assert not controller.keeper_ready.is_set()
+
+
+def test_keeper_route_streams_paced_true_silence(tmp_path: Path) -> None:
+    cfg = replace(config(tmp_path), probe_receive_only=True)
+    app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
+    with TestClient(app) as client:
+        controller: ProbeController = app.state.controller
+        token = _route_token(controller, role="keeper")
+        with client.websocket_connect(
+            f"/ws/keeper/{controller.run_id}",
+            headers={"x-telnyx-streaming-auth-token": token},
+        ) as ws:
+            ws.send_text(start_raw("route-call"))
+            frames = [json.loads(ws.receive_text()) for _ in range(3)]
+            for frame in frames:
+                assert frame["event"] == "media"
+                payload = base64.b64decode(frame["media"]["payload"])
+                assert payload == bytes(640)
+            assert controller.keeper_ready.is_set()
+            ws.send_text(json.dumps({"event": "stop", "sequence_number": "2"}))
+        for _ in range(1_000):
+            if not controller.keeper_socket_active:
+                break
+            time.sleep(0.001)
+        assert controller.failure is None
+        assert not controller.keeper_socket_active
+        events = (controller.artifacts.path / "events.jsonl").read_text()
+        assert '"caller_line_keepalive_started"' in events
+
+
 def test_monitor_route_measures_only_outbound_l16(tmp_path: Path) -> None:
     cfg = replace(config(tmp_path), probe_receive_only=True)
     app = create_app(cfg, cast("SafeCallControl", FakeCallControl(cfg.settings)))
@@ -1762,8 +1819,10 @@ def test_receive_only_agent_socket_is_diagnostic_only(
         controller: ProbeController = app.state.controller
         controller.bridge_ready.set()
         controller.mark_media_ready(acoustic_probe.PROBE_CHANNEL, time.monotonic_ns())
-        # The monitor socket supplies channel B readiness in receive-only mode.
+        # The monitor socket supplies channel B readiness in receive-only mode,
+        # and the keeper must be transmitting before the greeting may start.
         controller.mark_media_ready(acoustic_probe.AGENT_CHANNEL, time.monotonic_ns())
+        controller.keeper_ready.set()
         token = _route_token(controller, "leg-b-call", "agent")
         with client.websocket_connect(
             f"/ws/agent/{controller.run_id}",
