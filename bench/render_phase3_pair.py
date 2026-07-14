@@ -230,11 +230,11 @@ def render(
         )
     _text(
         draw,
-        (x(min(vad.fixture_end_rel_s, t1) / 2), lane1_y - int(h * 0.008)),
+        (x(min(vad.fixture_end_rel_s, t1) / 2), lane1_y + lane_h - int(h * 0.010)),
         "fixture duration (tx)",
         fs_axis,
         INK2,
-        anchor="mb",
+        anchor="ms",
     )
 
     # Waveform bands: min/max polygon per lane, review-tool style.
@@ -272,11 +272,11 @@ def render(
         yy += 12 * scale
     _text(
         draw,
-        (zero_x + 8 * scale, lane1_y + int(lane_h * 0.06)),
+        (zero_x + 8 * scale, lane1_y - int(h * 0.008)),
         "caller starts speaking (fixture emission)",
         fs_label,
         INK,
-        anchor="la",
+        anchor="lb",
     )
 
     # Per-lane acoustic stop markers, labeled from the manifests.
