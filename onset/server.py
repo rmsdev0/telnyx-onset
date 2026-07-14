@@ -31,6 +31,7 @@ from fastapi import (
 )
 
 from onset.agent import VoiceAgent
+from onset.benchmark import build_milestone_sink
 from onset.limits import CallLimiter
 from onset.logging import setup_logging
 from onset.media import Connected, Dtmf, Mark, Media, MediaStream, Start, Stop, decode
@@ -70,6 +71,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.settings = settings
     app.state.telnyx = TelnyxClient(settings)
     app.state.limiter = CallLimiter(settings.max_concurrent_calls)
+    milestone_sink, benchmark_profile = build_milestone_sink(settings)
+    app.state.milestone_sink = milestone_sink
+    app.state.benchmark_profile = benchmark_profile
+    app.state.benchmark_call_claimed = False
     # call_control_id -> VoiceAgent. Single event loop, so a plain dict is safe.
     app.state.agents = {}
     # One-time media-socket tokens: token -> call_control_id, minted at
@@ -275,6 +280,14 @@ async def media_ws(ws: WebSocket) -> None:
                 if event.call_control_id != expected_ccid:
                     log.warning("media.ccid_mismatch", ccid=event.call_control_id)
                     break
+                if (
+                    ws.app.state.benchmark_profile is not None
+                    and ws.app.state.benchmark_call_claimed
+                ):
+                    log.warning("benchmark.rejected_second_call")
+                    with contextlib.suppress(Exception):
+                        await telnyx.call(call_control_id).hangup()
+                    break
                 call_control_id = event.call_control_id
                 if not limiter.try_acquire():
                     log.warning("media.rejected_at_capacity")
@@ -282,6 +295,9 @@ async def media_ws(ws: WebSocket) -> None:
                         await telnyx.call(call_control_id).hangup()
                     break
                 acquired = True
+                if ws.app.state.benchmark_profile is not None:
+                    ws.app.state.benchmark_call_claimed = True
+                    ws.app.state.milestone_sink.record("benchmark_call_claimed")
                 media = MediaStream(
                     ws,
                     frame_ms=settings.frame_ms,
@@ -293,6 +309,8 @@ async def media_ws(ws: WebSocket) -> None:
                     telnyx.call(call_control_id),
                     media,
                     RESTAURANT_CONFIG,
+                    milestones=ws.app.state.milestone_sink,
+                    benchmark_profile=ws.app.state.benchmark_profile,
                 )
                 agent.set_call_info(call_control_id, event.from_number)
                 media.on_error = agent._on_socket_error

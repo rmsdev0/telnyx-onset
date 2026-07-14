@@ -18,12 +18,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
 
 from onset.audio import decode_l16_payload, encode_l16_payload
+from onset.types import MediaFlushResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -161,18 +163,41 @@ class MediaStream:
             return
         await self._out.put((epoch, _MARK, name.encode("utf-8")))
 
-    async def flush(self) -> None:
+    async def flush(self) -> MediaFlushResult:
         """Drop queued outbound audio and stop Telnyx playback immediately.
 
         Bumps the epoch so frames from the interrupted utterance still queued (or
         enqueued by a producer blocked mid-flush) are dropped, clears the local
         queue, then sends the Telnyx clear event. This is the barge-in primitive.
         """
+        old_epoch = self._epoch
         self._epoch += 1
+        invalidated_ns = time.monotonic_ns()
         self._drain()
-        with contextlib.suppress(Exception):
+        send_started_ns = time.monotonic_ns()
+        outcome = "completed"
+        error_category: str | None = None
+        try:
             await self._ws.send_text(json.dumps({"event": "clear"}))
-        log.info("media.flushed", epoch=self._epoch)
+        except Exception as e:
+            # A clear failure must remain visible to benchmark instrumentation,
+            # but interruption still cancels the producer so the call can wind
+            # down cleanly instead of crashing the agent loop.
+            outcome = "failed"
+            error_category = type(e).__name__
+            log.warning("media.clear_failed", error_category=error_category)
+        send_finished_ns = time.monotonic_ns()
+        result = MediaFlushResult(
+            old_epoch=old_epoch,
+            new_epoch=self._epoch,
+            invalidated_ns=invalidated_ns,
+            send_started_ns=send_started_ns,
+            send_finished_ns=send_finished_ns,
+            outcome=outcome,
+            error_category=error_category,
+        )
+        log.info("media.flushed", epoch=self._epoch, outcome=outcome)
+        return result
 
     def _drain(self) -> None:
         while True:

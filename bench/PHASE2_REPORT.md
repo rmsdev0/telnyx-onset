@@ -2,32 +2,32 @@
 
 ## Verdict
 
-**NO-GO**
+**GO — amended SIP measurement profile frozen**
 
-The offline remediation is implemented and tested. The original three attempts
-could not expose two tracks on one socket. A separately authorized fourth call
-exposed and corrected a transient dynamic-end handling error. A fifth corrected
-call captured both channels for the hard call duration but never completed
-greeting-track selection. A sixth diagnostic run reached greeting selection and
-fixture transmission, but proved that pre-greeting setup audio had been selected
-before the actual VoiceAgent greeting completed. A seventh causal-gated run then
-proved that neither inbound-only leg stream carries a valid returned greeting.
-An eighth run proved that `both_tracks` does not return WebSocket-injected audio
-on the agent socket's provider-outbound track under this topology. It did,
-however, expose causal post-greeting activity on the independently streamed
-probe leg. A ninth cross-leg/`both_tracks` run retained exact diagnostic WAVs
-and showed both inbound legs were quiet after greeting. A tenth run requested
-probe-leg `both_tracks` but received 1,067 inbound and zero outbound frames.
-The subsequent sanitized configuration audit found that the harness number is
-assigned to a separate Call Control application, while the bench had originated
-through the agent application's connection. Correct separate-application
-origination was then tested and produced the same zero-outbound result.
-Bidirectional WebSocket capture is exhausted. A receive-only staged run has now
-proved a returned greeting and natural stop on the joint channel candidate.
-The narrowly scoped harness-served fixture playback required for the full
-measurement call is implemented offline and awaits its bounded live attempt.
-No fixture match, manual waveform review, detector calibration, or empirical GO
-was produced. Phase 3 remains blocked.
+The original Call Control streaming topology was exhausted after twenty-six
+bounded calls. The amended external SIP endpoint then produced five diagnostic
+calls. SIP attempt 5 (`p2-96ddebf9e4d6eb36`, revision `1056e28`) was the first
+to reach `CAPTURE_COMPLETE_PENDING_REVIEW`; its waveform review was manually
+agreed and its one bounded loss interval was correctly voided. A later
+independent completion audit found that the adapter had not enforced the
+specification's fixture-interval transmit-delivery gate: it recorded only a
+final counter snapshot, so the tx WAV proved stack handoff but not wire
+delivery. The same audit corrected the archived review's void accounting and
+response-onset label and found the governing SIP amendment still marked draft.
+
+Amendment 1 revision 3 and SIP spec revision 4 now define the corrected path:
+enforced delivery deltas, explicit no-stimulus/echo/agent-only controls,
+bounded transport binding, complete manifests, and reproducible review tools.
+Attempts 1–5 remain valuable diagnostic evidence but are not promotion runs.
+The three calibration captures, bounded detector evaluation, corrected full
+capture, and independent evidence audit are now complete. Corrected SIP attempt
+6 (`p2-eba91f36fcd7334f`, revision `4227dff`) reached
+`CAPTURE_COMPLETE_PENDING_REVIEW` with enforced fixture-interval delivery and
+the selected detector candidate. Its sanitized waveform evidence agrees with
+the automated record. The maintainer inspected the annotated waveform, listened
+to both corrected RX/TX tracks, and recorded agreement on 2026-07-13. The
+independent audit therefore passes, `bench/measurement_profile.json` is frozen,
+and Phase 2 is closed. Phase 3 is unblocked but has not begun.
 
 ## Repository and scope
 
@@ -44,7 +44,7 @@ was produced. Phase 3 remains blocked.
 - Branch: `duplex`
 - Methodology authority: `BENCHMARK_PLAN.md`, unchanged
 - Production runtime modules modified: none
-- `bench/measurement_profile.json`: absent by design
+- `bench/measurement_profile.json`: frozen under reviewed Phase 2 evidence
 - Comparative benchmark results: none
 
 The probe remains a separate bench-only FastAPI application. Production
@@ -164,8 +164,9 @@ activity/silence threshold sets, plus every sustained-silence hold from
 100–1000 ms at a declared fixed step. The currently supported statistic is RMS
 dBFS; unsupported declared statistics, invalid windows, and invalid threshold
 orders are retained as named candidate failures rather than silently skipped.
-It evaluates labeled natural-pause and forced-stop segments and records every
-candidate, pass, and named failure. It does not select or persist a profile.
+It evaluates labeled natural-pause, silence, and forced-stop segments and
+records every candidate, pass, and named failure. It does not auto-select or
+persist a profile.
 Calibration inputs and derived evidence remain local ignored artifacts, and an
 independent review is required before any later profile freeze.
 
@@ -828,15 +829,17 @@ comparative results, or measurement profile were produced.
 - [x] One authorized monitor-coverage attempt retained.
 - [x] One authorized keeper-format attempt retained.
 - [x] One authorized caller-line keepalive attempt retained.
-- [x] Manual waveform agreement (SIP attempt 5, recorded 2026-07-13).
-- [ ] Completed bounded calibration.
-- [ ] Stable two-track live capture and separation.
+- [x] Diagnostic manual waveform agreement (SIP attempt 5, recorded 2026-07-13).
+- [x] Completed bounded calibration.
+- [x] Corrected SIP capture with isolated rx/tx reference and enforced delivery.
+- [x] Manual waveform agreement on the corrected full capture.
+- [x] Independent review of corrected live and calibration evidence.
 - [x] Independent sanitized-evidence review confirms empirical NO-GO.
 
-Phase 3 must not begin while any item remains unchecked. A live failure is
-`NO-GO`, not permission to weaken the endpoint. `measurement_profile.json` may
-be created only after a genuine, manually confirmed, independently reviewed
-live GO.
+All Phase 2 promotion items are checked. The frozen profile is the sole
+measurement authority for qualification; changing a frozen detector, topology,
+codec, fixture, delivery, or loss-void value invalidates qualification and
+requires a dated recalibration review.
 
 ## SIP harness live attempts (Amendment 1)
 
@@ -909,28 +912,156 @@ sample bounds, boundary insets, detector window summaries, fixture-envelope
 correlations, and the captured audio) and recorded **agreement** on every
 item of the review procedure, including the void-aware additions below:
 
-- Greeting appears only in Window A on rx (129 active frames, peak
-  −7.6 dBFS) and ends in a genuine natural stop; the backdated boundary
-  sits at the silence onset.
+- Greeting appears only in Window A on rx (125 active non-void frames, 10
+  voided frames, peak −7.6 dBFS) and ends in a genuine natural stop; the
+  backdated boundary sits at the silence onset.
 - tx is silent except the fixture in Window C; the transmitted audio's
   envelope correlation against the canonical fixture is 0.998.
 - Window C contains zero active rx frames (no overlap, no observed echo of
   the transmission), followed by the ≥100 ms separating silence.
-- The Window D response begins 7.65 s after the boundary and correlates
-  0.80 against the fixture envelope — below the 0.85 threshold and
-  indistinguishable from the greeting's different-speech baseline of 0.784,
-  corroborating the not-an-echo judgment by ear as well as by number.
+- The Window D sustained-activity run begins 7.44 s after the boundary; its
+  confirmation event was processed at 7.65 s. The bounded response correlation
+  is 0.80 against the fixture envelope, below the provisional 0.85 threshold;
+  the greeting's different-speech reference is 0.784. These values are
+  descriptive, not a statistical indistinguishability claim, and the echo
+  control must calibrate their interpretation.
 - The single 191 ms void sits mid-greeting, ends 1.12 s before the stop
   hold begins, and touches no certified interval; manifest void accounting
   matches the event log and sits within the declared bounds.
 - Transport telemetry: zero tx pull lateness, zero RTP anomalies beyond
   the one voided loss (1 of 1,244 packets), RTT ≈ 80 ms.
 
-The review rendering, its extracted data, and its generators are preserved
+The review rendering, its extracted data, and its portable generators are preserved
 in the run directory under `review/` (local, ignored). Per the promotion
 rules this agreement does not create a GO: the Section 7 calibration
 captures, bounded detector calibration, and the independent evidence review
-remain.
+remain. Attempt 5 predates the enforced transmit-counter delta and is therefore
+diagnostic rather than the corrected full capture required for promotion.
+
+### Calibration captures and corrected SIP attempt 6
+
+Recorded 2026-07-13 under the user's bounded live-call authorization.
+
+Two rejected diagnostics preceded the accepted controls and remain preserved:
+`p2-37463d5be1f97723` exposed a PJSUA2 2.15 stream-metadata API mismatch;
+`p2-4bb994c0dfb34016` exposed pre-answer watermark accounting and SWIG call
+destructor ordering. Both failed closed. The compatibility and lifecycle fixes
+were separately committed and the full offline suite passed before further
+calls.
+
+At clean revision `2afa41d`, the restore-safe runner then completed and
+validated all three controls while restoring and verifying the original Telnyx
+webhook in every exit path:
+
+- Agent-only `p2-1de191a7ca4e9f33`: uninterrupted scripted utterance,
+  zero voids and RTP anomalies, terminal
+  `control_agent_only_complete_pending_review`.
+- No-stimulus `p2-f57fc9336a1784c4`: no post-stop active frames,
+  fixture correlation 0.123 with no fixture transmitted, zero voids and RTP
+  anomalies, terminal `control_no_stimulus_complete_pending_review`.
+- Echo-control `p2-fb90d83bd3e307a2`: fixture delivery confirmed at
+  71 packets / 11,360 bytes against required 69 / 11,040, returned-fixture
+  correlation 0.0, zero voids and RTP anomalies, terminal
+  `control_echo_complete_pending_review`.
+
+The local ignored calibration evidence uses seven human-readable, exact sample
+ranges from those controls and attempt 5: three natural-pause segments, two
+forced-stop segments, and two explicit silence segments (no-stimulus and the
+echo-return interval). All ranges are void-free. The preregistered finite grid
+produced 1,120 per-segment records and 84 passing candidates. Applying plan
+section 7's ordering selected the simplest passing threshold — the single-level
+RMS gate at activity = silence = −42 dBFS — then its shortest passing hold,
+300 ms. The frozen candidate also retains the declared 20 ms window and 100 ms
+minimum-active arm. The complete evidence hash is
+`21467eebbbaa842ccacd8be828b0fd5432e3b2d51ae9ad5361a0bd1848e53267`;
+the ignored selection record names the rule and contains zero failures across
+all seven labels.
+
+Corrected SIP attempt 6 (`p2-eba91f36fcd7334f`) ran at clean revision
+`4227dff` with that candidate supplied explicitly. It reached
+`CAPTURE_COMPLETE_PENDING_REVIEW` and passed the restore-safe runner's delivery,
+clean-tree, mode, outcome, and teardown checks:
+
+- detector RMS / 20 ms / −42 dBFS activity / −42 dBFS silence / 100 ms arm /
+  300 ms hold;
+- fixture delivery 71 packets / 11,360 bytes against required 69 / 11,040;
+- zero loss voids, sequence gaps, regressions, or timestamp anomalies;
+- 5 ms maximum tx pull lateness and `hangup_sent` teardown;
+- common-clock boundaries: Window A anchor 7.203 s, backdated natural stop
+  10.563 s, emission 11.043 s, tx end 12.423 s, separating boundary 12.524 s,
+  sustained response onset 19.024 s, completion 24.611 s;
+- Window B and C each contain zero active rx frames at the calibrated gate;
+  Window D begins 6.500 s after separation;
+- tx/canonical-fixture correlation 0.998; response/fixture 0.803, below the
+  0.85 echo threshold and close to the unrelated greeting reference 0.789;
+- agent-side sanitized cross-check: the fixture was transcribed as “I need a
+  table for two.” and the generated response was “Got it, a table for two.
+  What date would you like to come in?”, matching the distinct Window-D cluster.
+
+The independent completion audit therefore returns **pass** for
+the calibration, transport, delivery, separation, not-an-echo, and loss-void
+evidence. The annotated common-clock waveform is internally consistent and a
+self-contained sanitized page with embedded RX/TX audio is preserved under the
+attempt-6 `review/` directory.
+
+### Manual waveform agreement — corrected SIP attempt 6
+
+Recorded 2026-07-13. The maintainer inspected the annotated common-clock
+waveform for `p2-eba91f36fcd7334f` and listened to both embedded RX/TX tracks,
+then recorded **agreement**. This confirms the manually reviewed evidence:
+
+- the greeting is confined to Window A and its backdated stop marker sits at
+  the genuine silence onset;
+- TX is silent except for the canonical fixture in Window C, while RX remains
+  silent through transmission and the separating interval;
+- the later Window-D cluster is the agent's response, not returned fixture
+  audio, consistent with the 0.803 response correlation below the 0.85 gate;
+- no loss void touches any interval because the corrected run recorded zero
+  loss events, and transport/delivery accounting matches the manifest.
+
+With that final gate satisfied, the selected condition-independent values are
+frozen in `bench/measurement_profile.json`. Phase 2 is empirically GO-capable;
+qualification and comparative collection remain future Phase 3 work.
+
+### Dated recalibration review 1 — 2026-07-13
+
+The first Phase 3 qualification campaign was discarded in full after trial
+`p3q-020` exposed a detector failure. The 300 ms candidate backdated an
+acoustic stop 522.7 ms after fixture onset, but the old response resumed 378.5
+ms later, before the transcript-triggered clear. This is a natural-pause false
+stop, not stale media after a valid stop.
+
+The failed span was pooled without using between-condition effects as an eighth
+human-readable natural-pause calibration label. Repeating the unchanged finite
+grid produced 1,280 records and 76 passing candidates. Applying the original
+selection rule retained the simplest passing threshold (RMS, 20 ms,
+−42/−42 dBFS, 100 ms arm) and advanced only the hold to the shortest passing
+value, 400 ms. The recalibration evidence SHA-256 is
+`ce3f7a72516227f26194dc526028a1a4c9b309133f6a82af8ad62982e5835d7a`.
+The profile is refrozen at that value; qualification must restart from a new
+write-once manifest and no result from the invalidated campaign may enter the
+final comparison.
+
+### Dated recalibration review 2 — 2026-07-13
+
+The complete replacement qualification campaign was also discarded. Trials
+`p3q-r1b-001`, `p3q-r1b-003`, and `p3q-r1b-008` each produced old-response
+activity after a detector-certified 400 ms stop. Those spans were pooled as
+three additional condition-independent natural-pause labels without consulting
+comparative latency effects.
+
+Repeating the same grid over eleven labels produced 1,760 records and 32
+passing candidates. The original selection rule again retained RMS, 20 ms,
+−42/−42 dBFS, and a 100 ms arm, while selecting 600 ms as the shortest passing
+hold. The evidence SHA-256 is
+`c099ed91a3e97a71b8cc19d5dc0cbea747ae5bfe745534db0d478a46e0397a7d`.
+
+The same campaign exposed a classification omission: harness terminal failures,
+including `post_stimulus_echo_detected`, did not force
+`call_transport_failure`. The runner now requires
+`phase3_capture_complete_pending_classification` as the successful terminal
+outcome. The profile is refrozen at 600 ms and another full qualification
+campaign is required; neither invalidated campaign may enter final analysis.
 
 ### Void-aware additions to the manual review procedure
 

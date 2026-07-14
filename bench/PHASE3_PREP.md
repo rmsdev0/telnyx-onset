@@ -1,22 +1,71 @@
 # Phase 3 preparation
 
-**Status:** preparation only. Phase 3 has NOT begun. Per `BENCHMARK_PLAN.md`
-§20 and `bench/PHASE2_REPORT.md`, Phase 3 may not start until every
-remaining Phase 2 promotion gate below passes and
-`bench/measurement_profile.json` is frozen under independent review.
+**Status:** Phase 3 is complete. Runtime, live qualification, final 40+40
+collection, and preregistered analysis are complete. Two early
+campaigns were invalidated by natural-pause false stops; after recalibration
+review 2 refroze the hold at 600 ms, the complete 20-attempt qualification
+passed with 18/18 eligible trials successful. The final comparison recorded
+32/40 successful VAD attempts and 28/40 successful transcript attempts, with a
+640.2 ms transcript-minus-VAD median latency difference.
 
 ## Where Phase 2 stands (2026-07-13)
 
 - SIP attempt 5 (`p2-96ddebf9e4d6eb36`, revision `1056e28`) produced the
   first `CAPTURE_COMPLETE_PENDING_REVIEW`.
 - Manual waveform agreement: **recorded** (PHASE2_REPORT, 2026-07-13),
-  including the void-aware checks.
-- `bench/measurement_profile.json`: absent by design, and must remain so
-  until the gates below pass.
+  including the void-aware checks. A completion audit corrected the review to
+  125 active non-void Window-A frames plus 10 voided frames and a 7.44 s
+  sustained Window-D onset. Attempt 5 remains diagnostic because its revision
+  did not enforce fixture-interval transmit-counter deltas.
+- Amendment 1 revision 3 / SIP spec revision 4: in force for calibration
+  captures, with delivery enforcement and explicit control modes implemented.
+- Calibration controls completed at revision `2afa41d`: agent-only
+  `p2-1de191a7ca4e9f33`, no-stimulus `p2-f57fc9336a1784c4`, and echo-control
+  `p2-fb90d83bd3e307a2`.
+- Bounded calibration completed over seven labels and 1,120 records. The
+  initially selected candidate was RMS, 20 ms, −42/−42 dBFS, 100 ms arm,
+  300 ms hold.
+- The first live qualification campaign invalidated that hold after trial 20
+  exposed a 379 ms natural pause followed by resumed old-response audio.
+  Recalibration review 1 pooled that condition-independent failure as an
+  eighth natural-pause label and repeated the unchanged finite grid (1,280
+  records). The same selection rule retains −42/−42 dBFS and selects the
+  shortest passing hold, 400 ms. The first qualification campaign is discarded
+  in full; a fresh manifest and complete rerun are required.
+- The first replacement manifest was superseded before dialing when the live
+  harness preflight found test-only type-check failures. No call or measurement
+  artifact was created; the runner now reports this exit before artifact lookup.
+- The complete replacement campaign then recorded 20 attempted calls. Three
+  trials exposed 400 ms natural-pause false stops, so that campaign is also
+  discarded in full. Pooling those three spans produced 1,760 records and 32
+  passing candidates; the unchanged rule selects a 600 ms hold. Its audit also
+  found that three `post_stimulus_echo_detected` harness failures were not
+  reflected by the classifier, which now requires the named successful harness
+  terminal outcome and otherwise emits `call_transport_failure`.
+- The 600 ms qualification attempted all 20 frozen trials without replacement:
+  transcript was 10/10 eligible and successful; VAD was 8/10 eligible and 8/8
+  successful. The two VAD exclusions were declared stimulus/playback timing
+  collisions. There were no detector, terminal, transport, configuration,
+  action-count, or caller-turn failures among eligible trials. The Section 20
+  gate to final collection passes.
+- Corrected full attempt 6 (`p2-eba91f36fcd7334f`, revision `4227dff`) reached
+  `CAPTURE_COMPLETE_PENDING_REVIEW` with enforced delivery, zero voids and RTP
+  anomalies, and a passing independent evidence audit.
+- The maintainer inspected the annotated waveform, listened to the corrected
+  RX/TX tracks, and recorded agreement on 2026-07-13.
+- `bench/measurement_profile.json`: frozen; changing any profile value requires
+  recalibration before qualification can resume.
 
-## Remaining Phase 2 gates, in order
+## Phase 2 closeout
 
-### 1. Calibration captures (plan §7 and §13, under the SIP topology)
+The final corrected-capture agreement and independent evidence pass are recorded
+in `bench/PHASE2_REPORT.md`. The frozen profile contains the selected detector,
+SIP topology and codec, fixture hashes, delivery requirements, loss-void bounds,
+and sanitized evidence identifiers. No further Phase 2 call is required.
+
+## Completed Phase 2 work
+
+### 1. Calibration captures — complete
 
 Three classes of separately authorized bounded calls, each with the same
 teardown-and-evidence discipline as attempts 1–5. All audio is synthetic;
@@ -35,12 +84,12 @@ artifacts stay local and ignored.
    utterance end-to-end. Purpose: the natural-end reference and
    natural-pause segments for detector calibration labels.
 
-Implementation note: the harness needs a small `--mode` switch
-(no-stimulus / echo-control / agent-only) that disables fixture arming or
-the response window as appropriate; each mode is a bench-only control-loop
-variant with its own named terminal outcome, never a measurement run.
+Implementation status: the harness exposes `--mode no-stimulus`,
+`--mode echo-control`, and `--mode agent-only`. Each is a bench-only,
+fail-closed control-loop variant with a named pending-review outcome, never a
+measurement run. Echo control retains mandatory fixture-delivery deltas.
 
-### 2. Bounded detector calibration (plan §7)
+### 2. Bounded detector calibration — complete
 
 Run the existing `bench/acoustic_stop.evaluate_bounded_calibration` over
 labeled segments cut from the calibration captures plus attempt 5's
@@ -50,16 +99,38 @@ already in code (RMS dBFS statistic, 20 ms windows, threshold pairs, holds
 100–1000 ms). Record every candidate, pass, and named failure; select
 nothing automatically.
 
-### 3. Independent evidence review
+### 3. Independent evidence review — complete
 
 An independent review of: the attempt-5 sanitized evidence and manual
 agreement, the calibration capture results, the chosen detector candidate,
 and the loss-void machinery's behavior across attempts 4–5. Only after its
-sign-off is `measurement_profile.json` created and frozen (with the
+sign-off, and after a corrected full capture with enforced delivery and manual
+waveform agreement, is `measurement_profile.json` created and frozen (with the
 detector candidate, capture topology identifiers, fixture hashes, and the
 addendum's bounds), and Phase 2 closes as empirically GO-capable.
 
-## What Phase 3 actually is (scope reminder, not a start)
+## Phase 3 execution status
+
+The runtime now exposes fail-closed `onset-fd-vad` and
+`onset-fd-transcript` modes, generation-scoped interruption/cancellation/clear
+milestones, frozen-profile loading, and sanitized monotonic JSONL records. The
+interrupting transcript is preserved for turn assembly rather than discarded.
+Offline adversarial tests prove that each ineligible source is inert and that
+the caller turn commits once.
+
+`bench.phase3` now prepares write-once, deterministic balanced-block manifests
+for qualification/final runs and applies the plan's overlapping failure
+taxonomy without replacing failed attempts. Formal qualification still
+requires a clean committed revision and separately authorized bounded live
+calls through the common SIP boundary.
+
+The initial prospective manifest was superseded before any call because its
+preflight exposed a Phase 2/Phase 3 scheduling mismatch. The corrected Phase 3
+harness emits 1,000 ms into confirmed active playback and uses the 3,200 ms
+frozen natural-end reference derived from the agent-only control. A replacement
+manifest must be frozen from the corrected clean revision before live calls.
+
+## Phase 3 scope
 
 Per plan §4–§5 and §20, Phase 3 is benchmark-ready runtime work:
 

@@ -23,6 +23,10 @@ class TurnManager:
     def __init__(self) -> None:
         self._transcript_buffer: list[str] = []
         self._turn_start_time: float | None = None
+        self._source_event_count = 0
+        self._turn_sequence = 0
+        self.last_completed_turn_id: int | None = None
+        self.last_completed_source_event_count = 0
 
     def handle_event(self, event: STTEvent) -> str | None:
         """Process an STT event and return a complete user turn if detected.
@@ -32,17 +36,22 @@ class TurnManager:
         """
         if event.type == STTEventType.TRANSCRIPT_FINAL:
             self._start_turn_clock()
+            self._source_event_count += 1
             self._transcript_buffer.append(event.transcript)
             log.debug("turn.transcript_final", transcript=event.transcript)
             return None
 
         if event.type == STTEventType.TRANSCRIPT_INTERIM:
             self._start_turn_clock()
+            self._source_event_count += 1
             log.debug("turn.transcript_interim", transcript=event.transcript)
             return None
 
         if event.type == STTEventType.UTTERANCE_END:
+            self._source_event_count += 1
             if not self._transcript_buffer:
+                self._turn_start_time = None
+                self._source_event_count = 0
                 return None
 
             utterance = " ".join(self._transcript_buffer)
@@ -61,6 +70,10 @@ class TurnManager:
 
             self._transcript_buffer.clear()
             self._turn_start_time = None
+            self._turn_sequence += 1
+            self.last_completed_turn_id = self._turn_sequence
+            self.last_completed_source_event_count = self._source_event_count
+            self._source_event_count = 0
             return utterance
 
         return None
@@ -74,3 +87,4 @@ class TurnManager:
         """Reset for the next turn, discarding any partial transcript buffer."""
         self._transcript_buffer.clear()
         self._turn_start_time = None
+        self._source_event_count = 0

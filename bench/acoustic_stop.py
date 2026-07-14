@@ -11,6 +11,11 @@ from array import array
 from dataclasses import dataclass
 from typing import Literal
 
+CALIBRATION_ACTIVITY_THRESHOLDS_DBFS = (-42.0, -40.0, -38.0, -36.0)
+CALIBRATION_SILENCE_THRESHOLDS_DBFS = (-50.0, -48.0, -45.0, -42.0)
+CALIBRATION_WINDOW_SIZES_MS = (20,)
+CALIBRATION_HOLD_STEP_MS = 100
+
 
 @dataclass(frozen=True, slots=True)
 class DetectorConfig:
@@ -76,7 +81,7 @@ class LabeledCalibrationSegment:
     """A local synthetic/baseline segment excluded from benchmark results."""
 
     label: str
-    kind: Literal["natural_pause", "forced_stop"]
+    kind: Literal["natural_pause", "silence", "forced_stop"]
     pcm16: bytes
 
 

@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "status": "frozen",
+  "frozen_date": "2026-07-13",
+  "phase_2_verdict": "GO",
+  "authority": "BENCHMARK_PLAN.md section 7 and Amendment 1 revision 3",
+  "detector": {
+    "statistic": "rms_dbfs",
+    "sample_rate": 16000,
+    "window_ms": 20,
+    "activity_threshold_dbfs": -42.0,
+    "silence_threshold_dbfs": -42.0,
+    "minimum_active_ms": 100,
+    "sustained_silence_ms": 600
+  },
+  "echo_gate": {
+    "fixture_envelope_correlation_threshold": 0.85,
+    "maximum_alignment_ms": 4000
+  },
+  "capture_topology": {
+    "harness": "sip_media_endpoint",
+    "clock": "time.monotonic_ns",
+    "rx_channel": "harness_rx",
+    "tx_reference_channel": "harness_tx_reference",
+    "rtp_identity_source": "synthetic_media_port_sequence",
+    "sip_transport": "tls",
+    "signaling_port": 50620,
+    "signaling_port_range": 10,
+    "media_port": 40000,
+    "media_port_range": 100
+  },
+  "media_format": {
+    "wire_encoding": "PCMU",
+    "wire_sample_rate": 8000,
+    "wire_sample_width_bits": 8,
+    "analysis_sample_rate": 16000,
+    "channels": 1,
+    "analysis_sample_width_bytes": 2,
+    "frame_ms": 20,
+    "normalization": "g711_ulaw_zero_order_hold",
+    "fixture_decimation_rule": "hamming63_lowpass3400_group_delay_compensated_decimate2"
+  },
+  "fixture": {
+    "canonical_sha256": "b551b31085400d710378f7ff6da10ce46b2b600795e9d61cd7dd12c46f3e2096",
+    "emitted_sha256": "36b7e68736a59d5bf94fc2a14ab63ec19e2765ad22b9b9eb8135e306fea60eb0",
+    "required_tx_packets": 69,
+    "required_tx_bytes": 11040
+  },
+  "delivery_gate": {
+    "fixture_interval_counter_delta_required": true,
+    "missing_or_reset_counter_outcome": "stimulus_send_failed",
+    "tx_burst_bound_ms": 10
+  },
+  "loss_void_policy": {
+    "maximum_events": 5,
+    "maximum_total_ms": 1000,
+    "jitter_buffer_ms": 60,
+    "void_end_pad_ms": 80,
+    "watermark_stall_bound_ms": 2000
+  },
+  "capture_limits": {
+    "hard_call_cap_s": 60,
+    "maximum_recorded_samples_8k": 560000
+  },
+  "evidence": {
+    "calibration_evidence_sha256": "c099ed91a3e97a71b8cc19d5dc0cbea747ae5bfe745534db0d478a46e0397a7d",
+    "prior_calibration_evidence_sha256": "21467eebbbaa842ccacd8be828b0fd5432e3b2d51ae9ad5361a0bd1848e53267",
+    "recalibration_review": {
+      "recorded_date": "2026-07-13",
+      "outcome": "pass",
+      "invalidated_qualification_manifest": "bench/phase3_qualification_manifest.json",
+      "failure_trial_id": "p3q-020",
+      "pooled_label": "qualification1_trial20_resumed_natural_pause",
+      "selection_rule": "same finite grid and shortest passing hold for the existing simplest threshold",
+      "selected_sustained_silence_ms": 400
+    },
+    "recalibration_review_2": {
+      "recorded_date": "2026-07-13",
+      "outcome": "pass",
+      "invalidated_qualification_manifest": "bench/phase3_qualification_manifest_recalibration1b.json",
+      "failure_trial_ids": [
+        "p3q-r1b-001",
+        "p3q-r1b-003",
+        "p3q-r1b-008"
+      ],
+      "pooled_labels_added": 3,
+      "candidate_records": 1760,
+      "passing_candidates": 32,
+      "selection_rule": "same finite grid and shortest passing hold for the existing simplest threshold",
+      "selected_sustained_silence_ms": 600
+    },
+    "calibration_controls": {
+      "agent_only": "p2-1de191a7ca4e9f33",
+      "no_stimulus": "p2-f57fc9336a1784c4",
+      "echo_control": "p2-fb90d83bd3e307a2"
+    },
+    "corrected_capture": {
+      "run_id": "p2-eba91f36fcd7334f",
+      "git_commit": "4227dffb376d7eb697855a21a2c69e5647722f9e",
+      "terminal_outcome": "capture_complete_pending_review",
+      "fixture_delivery_packets": 71,
+      "fixture_delivery_bytes": 11360,
+      "rx_void_events": 0,
+      "tx_fixture_correlation": 0.998,
+      "response_fixture_correlation": 0.803,
+      "greeting_fixture_correlation": 0.789
+    },
+    "manual_waveform_agreement": {
+      "recorded_date": "2026-07-13",
+      "reviewer": "maintainer",
+      "outcome": "agreement"
+    },
+    "independent_evidence_review": {
+      "recorded_date": "2026-07-13",
+      "outcome": "pass"
+    }
+  }
+}

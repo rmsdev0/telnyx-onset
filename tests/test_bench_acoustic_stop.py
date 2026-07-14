@@ -158,6 +158,7 @@ def test_bounded_calibration_records_every_candidate_without_selecting() -> None
         LabeledCalibrationSegment(
             "forced", "forced_stop", pcm((8_000, 200), (0, 1_000))
         ),
+        LabeledCalibrationSegment("silence", "silence", pcm((0, 1_000))),
     )
     records = evaluate_bounded_calibration(
         segments,
@@ -165,7 +166,7 @@ def test_bounded_calibration_records_every_candidate_without_selecting() -> None
         silence_thresholds_dbfs=(-45.0,),
         hold_step_ms=100,
     )
-    assert len(records) == 20
+    assert len(records) == 30
     assert {record.sustained_silence_ms for record in records} == set(
         range(100, 1_001, 100)
     )

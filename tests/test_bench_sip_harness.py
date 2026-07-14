@@ -15,13 +15,16 @@ if TYPE_CHECKING:
 
 from bench.acoustic_probe import (
     Fixture,
+    best_fixture_envelope_correlation,
     decode_pcmu_8k_to_pcm16_16k,
     match_fixture_reference,
 )
+from bench.acoustic_stop import DetectorConfig
 from bench.media_capture import ArtifactDirectory, new_run_id
 from bench.sip_harness import (
     FRAME_MS,
     PCMU_FRAME_BYTES,
+    CaptureMode,
     EmittedFixture,
     RxFrame,
     SipSession,
@@ -51,10 +54,32 @@ def _fixture() -> Fixture:
     )
 
 
-def _session(tmp_path: Path) -> SipSession:
+def _session(
+    tmp_path: Path,
+    *,
+    mode: CaptureMode = "measurement",
+    control_observation_ns: int = 10_000_000_000,
+) -> SipSession:
     fixture = _fixture()
     config = SipSessionConfig(
-        fixture=fixture, emitted=derive_emission_fixture(fixture)
+        fixture=fixture,
+        emitted=derive_emission_fixture(fixture),
+        mode=mode,
+        control_observation_ns=control_observation_ns,
+        detector=(
+            DetectorConfig(
+                activity_threshold_dbfs=-42,
+                silence_threshold_dbfs=-42,
+                minimum_active_ms=100,
+                sustained_silence_ms=300,
+            )
+            if mode == "phase3"
+            else DetectorConfig()
+        ),
+        phase3_trial_id="p3q-001" if mode == "phase3" else "",
+        phase3_condition="onset-fd-vad" if mode == "phase3" else "",
+        barge_offset_ns=100_000_000,
+        natural_end_ns=3_200_000_000,
     )
     artifacts = ArtifactDirectory(tmp_path, new_run_id())
     return SipSession(config, artifacts, dial_requested_ns=1_000)
@@ -63,12 +88,20 @@ def _session(tmp_path: Path) -> SipSession:
 class Driver:
     """Deterministic fake media layer driving the session on a fake clock."""
 
-    def __init__(self, session: SipSession, start_ns: int = 10_000) -> None:
+    def __init__(
+        self,
+        session: SipSession,
+        start_ns: int = 10_000,
+        *,
+        report_delivery: bool = True,
+    ) -> None:
         self.session = session
         self.now_ns = start_ns
         self.rtp_sequence = 100
         self.rtp_timestamp = 0
         self.tx_frames: list[bytes] = []
+        self.tx_packets = 0
+        self.report_delivery = report_delivery
 
     def answer(self, codec: str = "PCMU") -> None:
         self.session.handle_answered(codec, self.now_ns)
@@ -81,6 +114,17 @@ class Driver:
     ) -> None:
         """Advance one 20 ms frame: pull tx, deliver rx, tick."""
         self.tx_frames.append(self.session.pull_tx_frame(self.now_ns))
+        self.tx_packets += 1
+        if self.report_delivery:
+            self.session.observe_delivery_counters(
+                {
+                    "tx_packets": self.tx_packets,
+                    "tx_bytes": self.tx_packets * PCMU_FRAME_BYTES,
+                    "rx_packets": self.tx_packets,
+                    "rx_loss": 0,
+                },
+                self.now_ns,
+            )
         self.rtp_sequence += 1 + sequence_jump
         self.rtp_timestamp += PCMU_FRAME_BYTES * (1 + sequence_jump)
         pcmu = encode_pcm16_to_pcmu(rx_pcm16_8k or bytes(320))
@@ -97,12 +141,24 @@ class Driver:
         # off the media path via snapshot + verdict.
         snapshot = self.session.pending_echo_check()
         if snapshot is not None:
+            maximum_alignment_ms = (
+                self.session.config.control_observation_ns // 1_000_000
+                if self.session.config.mode == "no-stimulus"
+                else self.session.config.echo_search_ms
+            )
             match = match_fixture_reference(
                 snapshot,
                 self.session.config.fixture,
-                maximum_alignment_ms=self.session.config.echo_search_ms,
+                maximum_alignment_ms=maximum_alignment_ms,
             )
-            self.session.apply_echo_verdict(match, self.now_ns)
+            score = best_fixture_envelope_correlation(
+                snapshot,
+                self.session.config.fixture,
+                maximum_alignment_ms=maximum_alignment_ms,
+            )
+            self.session.apply_echo_verdict(
+                match, self.now_ns, correlation_score=score
+            )
         self.now_ns += NS_PER_FRAME
 
     def run(self, frames: int, rx_pcm16_8k: bytes | None = None) -> None:
@@ -168,6 +224,10 @@ def test_happy_path_completes_pending_review(tmp_path: Path) -> None:
     session.finalize(teardown_result="hangup_sent", now_ns=driver.now_ns)
     manifest = json.loads((session.artifacts.path / "manifest.json").read_text())
     assert manifest["gate_outcome"] == "CAPTURE_COMPLETE_PENDING_REVIEW"
+    assert manifest["tx_delivery_evidence"]["confirmed"] is True
+    assert manifest["clock_process_id"] > 0
+    assert manifest["fixture_onset"]["first_active_sample_16k"] == 0
+    assert manifest["capture_mode"] == "measurement"
     assert manifest["emitted_fixture_sha256"] == session.config.emitted.sha256
     assert manifest["target_legs"] is None
     # The fixture actually went out on the tx wire path.
@@ -175,6 +235,36 @@ def test_happy_path_completes_pending_review(tmp_path: Path) -> None:
     with wave.open(str(session.artifacts.path / "tx_8k.wav")) as wav:
         assert wav.getframerate() == 8_000
         assert wav.getnframes() > 0
+
+
+def test_phase3_emits_during_active_audio_and_records_acoustic_stop(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path, mode="phase3")
+    driver = Driver(session)
+    driver.answer()
+    driver.run(12, LOUD_8K)
+    assert session.emission_boundary_ns is not None
+    assert session.greeting_stop_ns is None
+    driver.run(20, QUIET_8K)
+    assert session.greeting_stop_ns is not None
+    assert session.emission_boundary_ns < session.greeting_stop_ns
+    driver.run(10, LOUD_8K)
+    driver.run(300, QUIET_8K)
+    assert session.outcome == "phase3_capture_complete_pending_classification"
+
+    session.finalize(teardown_result="hangup_sent", now_ns=driver.now_ns)
+    manifest = json.loads((session.artifacts.path / "manifest.json").read_text())
+    assert (
+        manifest["gate_outcome"]
+        == "QUALIFICATION_CAPTURE_COMPLETE_PENDING_CLASSIFICATION"
+    )
+    assert manifest["capture_mode"] == "phase3"
+    assert manifest["tx_delivery_evidence"]["required"] is True
+    assert manifest["phase3"]["trial_id"] == "p3q-001"
+    assert manifest["phase3"]["agent_audio_active_at_stimulus"] is True
+    assert manifest["phase3"]["stop_before_natural_end"] is True
+    assert manifest["phase3"]["harness_boundary_latency_ms"] > 0
 
 
 def test_response_with_internal_pause_still_completes(tmp_path: Path) -> None:
@@ -200,6 +290,61 @@ def test_response_with_internal_pause_still_completes(tmp_path: Path) -> None:
     driver.run(400, QUIET_8K)  # accumulate the echo-judging window
     assert session._d_candidate_start_window is not None
     assert session.outcome == "capture_complete_pending_review"
+
+
+def test_missing_fixture_delivery_fails_closed(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    driver = Driver(session, report_delivery=False)
+    driver.answer()
+    _drive_to_armed(driver)
+    for _ in range(60):
+        if session.fixture_end_ns is not None:
+            break
+        driver.exchange(QUIET_8K)
+    assert session.fixture_end_ns is not None
+    session.tick(session.fixture_end_ns + 2_000_000_001)
+    assert session.outcome == "stimulus_send_failed"
+
+
+def test_delivery_counter_reset_fails_closed(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session.observe_delivery_counters({"tx_packets": 10, "tx_bytes": 1_600}, 1)
+    session.observe_delivery_counters({"tx_packets": 9, "tx_bytes": 1_440}, 2)
+    assert session.outcome == "stimulus_send_failed"
+
+
+def test_agent_only_control_stops_after_natural_end(tmp_path: Path) -> None:
+    session = _session(tmp_path, mode="agent-only")
+    driver = Driver(session)
+    driver.answer()
+    driver.run(10, LOUD_8K)
+    driver.run(30, QUIET_8K)
+    assert session.outcome == "control_agent_only_complete_pending_review"
+    assert session.emission_boundary_ns is None
+
+
+def test_no_stimulus_control_observes_silence_without_emission(tmp_path: Path) -> None:
+    session = _session(
+        tmp_path, mode="no-stimulus", control_observation_ns=200_000_000
+    )
+    driver = Driver(session)
+    driver.answer()
+    driver.run(10, LOUD_8K)
+    driver.run(45, QUIET_8K)
+    assert session.outcome == "control_no_stimulus_complete_pending_review"
+    assert session.emission_boundary_ns is None
+    assert all(frame == bytes([0xFF]) * 160 for frame in driver.tx_frames)
+
+
+def test_echo_control_captures_bounded_quiet_return(tmp_path: Path) -> None:
+    session = _session(tmp_path, mode="echo-control")
+    driver = Driver(session)
+    driver.answer()
+    _drive_to_armed(driver)
+    driver.run(400, QUIET_8K)
+    assert session.outcome == "control_echo_complete_pending_review"
+    assert session.control_fixture_correlation == 0.0
+    assert session._delivery_confirmed
 
 
 def test_setup_blip_cannot_anchor_window_a(tmp_path: Path) -> None:

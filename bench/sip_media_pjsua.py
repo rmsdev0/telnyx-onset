@@ -37,6 +37,12 @@ DISCONNECT_WAIT_S = 10
 JITTER_BUFFER_MS = 60
 VOID_END_PAD_NS = (JITTER_BUFFER_MS + 20) * 1_000_000
 
+# The CLI exits with os._exit immediately after run_live_call returns. Keep
+# SWIG-owned objects alive until that point: destroying a disconnected Call
+# wrapper after PJSUA has already invalidated its call id asserts inside
+# pjsua_call_set_user_data on PJSUA2 2.15.1.
+_LIVE_REFS: list[object] = []
+
 
 class _HarnessPort(pj.AudioMediaPort):  # type: ignore[misc]
     """Pull/push port on the stack's 8 kHz media clock."""
@@ -81,8 +87,48 @@ class _Call(pj.Call):  # type: ignore[misc]
                 media.type == pj.PJMEDIA_TYPE_AUDIO
                 and media.status == pj.PJSUA_CALL_MEDIA_ACTIVE
             ):
+                # PJSUA2's generated Python surface differs across releases:
+                # 2.15 exposes the channel count through audCodecParam.info,
+                # while some builds expose codecChannelCount directly.  Media
+                # attachment must not depend on that optional convenience
+                # property; otherwise an AttributeError in this callback leaves
+                # an answered call with no bridge attached.
+                try:
+                    stream = self.getStreamInfo(index)
+                    channel_count = getattr(stream, "codecChannelCount", None)
+                    if channel_count is None:
+                        channel_count = stream.audCodecParam.info.channelCnt
+                    signature = (
+                        str(stream.codecName),
+                        int(stream.codecClockRate),
+                        int(channel_count),
+                        int(stream.dir),
+                        int(stream.txPt),
+                        int(stream.rxPt),
+                    )
+                    self._bridge.observe_media_signature(signature)
+                except (AttributeError, TypeError, pj.Error):
+                    # Renegotiation evidence is best-effort when bindings omit
+                    # stream metadata. The audio bridge remains mandatory.
+                    pass
                 audio = self.getAudioMedia(index)
                 self._bridge.attach_media(audio)
+
+
+class _Account(pj.Account):  # type: ignore[misc]
+    """Outbound-only account that rejects every unsolicited inbound call."""
+
+    def __init__(self, bridge: _CallBridge) -> None:
+        super().__init__()
+        self._bridge = bridge
+
+    def onIncomingCall(self, prm: object) -> None:  # noqa: N802
+        self._bridge.record_unsolicited_call()
+        incoming = pj.Call(self, prm.callId)  # type: ignore[attr-defined]
+        response = pj.CallOpParam()
+        response.statusCode = 486
+        response.reason = "Busy Here"
+        incoming.answer(response)
 
 
 class _CallBridge:
@@ -101,6 +147,8 @@ class _CallBridge:
         # unique PCMU frame maps to one prebuilt ByteVector: no per-frame
         # conversion or SWIG-element loop on the media clock (attempt 2).
         self._tx_vector_cache: dict[bytes, object] = {}
+        self._media_signature: tuple[object, ...] | None = None
+        self._media_attached = False
 
     @staticmethod
     def _now_ns() -> int:
@@ -118,9 +166,25 @@ class _CallBridge:
                 self.session.handle_remote_bye(self._now_ns())
 
     def attach_media(self, audio: pj.AudioMedia) -> None:
-        if self.port is not None:
+        if self.port is not None and not self._media_attached:
             self.port.startTransmit(audio)
             audio.startTransmit(self.port)
+            self._media_attached = True
+
+    def observe_media_signature(self, signature: tuple[object, ...]) -> None:
+        with self.lock:
+            if self._media_signature is None:
+                self._media_signature = signature
+                return
+            self.session.handle_renegotiation(
+                changed=signature != self._media_signature,
+                now_ns=self._now_ns(),
+            )
+            self._media_signature = signature
+
+    def record_unsolicited_call(self) -> None:
+        with self.lock:
+            self.session.handle_unsolicited_inbound_call(self._now_ns())
 
     def pull_tx_buffer(self) -> tuple[object, int]:
         with self.lock:
@@ -161,6 +225,11 @@ def run_live_call(
     sip_domain: str,
     caller_id: str,
     agent_number: str,
+    bind_address: str = "0.0.0.0",
+    signaling_port: int = 50_620,
+    signaling_port_range: int = 10,
+    media_port: int = 40_000,
+    media_port_range: int = 100,
 ) -> None:
     """Place the bounded call and drive the session to a terminal outcome."""
     ep = pj.Endpoint()
@@ -179,7 +248,10 @@ def run_live_call(
     ep.libInit(ep_cfg)
 
     transport_cfg = pj.TransportConfig()
-    transport_cfg.port = 0
+    transport_cfg.boundAddress = bind_address
+    transport_cfg.port = signaling_port
+    transport_cfg.portRange = signaling_port_range
+    transport_cfg.randomizePort = False
     ep.transportCreate(pj.PJSIP_TRANSPORT_TLS, transport_cfg)
     ep.libStart()
     ep.audDevManager().setNullDev()
@@ -197,9 +269,14 @@ def run_live_call(
     acc_cfg.callConfig.timerUse = pj.PJSUA_SIP_TIMER_ALWAYS
     acc_cfg.callConfig.timerSessExpiresSec = 90
     acc_cfg.callConfig.timerMinSESec = 90
+    acc_cfg.mediaConfig.transportConfig.boundAddress = bind_address
+    acc_cfg.mediaConfig.transportConfig.port = media_port
+    acc_cfg.mediaConfig.transportConfig.portRange = media_port_range
+    acc_cfg.mediaConfig.transportConfig.randomizePort = False
     cred = pj.AuthCredInfo("digest", "*", sip_username, 0, sip_password)
     acc_cfg.sipConfig.authCreds.append(cred)
-    account = pj.Account()
+    bridge = _CallBridge(session, None)
+    account = _Account(bridge)
     account.create(acc_cfg)
 
     fmt = pj.MediaFormatAudio()
@@ -208,7 +285,6 @@ def run_live_call(
     fmt.channelCount = 1
     fmt.bitsPerSample = 16
     fmt.frameTimeUsec = 20_000
-    bridge = _CallBridge(session, None)
     port = _HarnessPort(bridge)
     port.createPort("bench-harness-port", fmt)
     bridge.port = port
@@ -229,6 +305,19 @@ def run_live_call(
         while True:
             ep.libHandleEvents(EVENT_POLL_MS)
             now_ns = time.monotonic_ns()
+            if bridge.answered and not answered_seen:
+                # Reset the pre-dial hold only after taking the loss-counter
+                # baseline. A normal answer may take longer than the 2 s
+                # watermark-stall bound; that setup latency is not a stalled
+                # post-answer stats poll.
+                answered_seen = True
+                last_stats_ns = now_ns
+                try:
+                    known_loss = int(call.getStreamStat(0).rtcp.rxStat.loss)
+                except pj.Error:
+                    known_loss = 0
+                with bridge.lock:
+                    session.set_scan_watermark(now_ns)
             with bridge.lock:
                 session.tick(now_ns)
                 outcome = session.outcome
@@ -240,24 +329,32 @@ def run_live_call(
             if snapshot is not None:
                 # Heavy correlation runs here, off the media path and outside
                 # the lock, so the stack's frame clock is never starved.
-                from bench.acoustic_probe import match_fixture_reference
+                from bench.acoustic_probe import (
+                    best_fixture_envelope_correlation,
+                    match_fixture_reference,
+                )
 
+                maximum_alignment_ms = (
+                    session.config.control_observation_ns // 1_000_000
+                    if session.config.mode == "no-stimulus"
+                    else session.config.echo_search_ms
+                )
                 match = match_fixture_reference(
                     snapshot,
                     session.config.fixture,
-                    maximum_alignment_ms=session.config.echo_search_ms,
+                    maximum_alignment_ms=maximum_alignment_ms,
+                )
+                score = best_fixture_envelope_correlation(
+                    snapshot,
+                    session.config.fixture,
+                    maximum_alignment_ms=maximum_alignment_ms,
                 )
                 with bridge.lock:
-                    session.apply_echo_verdict(match, time.monotonic_ns())
-            if bridge.answered and not answered_seen:
-                # Interval accounting starts at answer: pre-answer counter
-                # noise must not void (and instantly overrun) the timeline.
-                answered_seen = True
-                last_stats_ns = now_ns
-                try:
-                    known_loss = int(call.getStreamStat(0).rtcp.rxStat.loss)
-                except pj.Error:
-                    known_loss = 0
+                    session.apply_echo_verdict(
+                        match,
+                        time.monotonic_ns(),
+                        correlation_score=score,
+                    )
             if (
                 answered_seen
                 and now_ns - last_stats_ns >= STATS_POLL_NS
@@ -292,7 +389,17 @@ def run_live_call(
                         "rtt_estimate_ms": float(stat.rtcp.rttUsec.mean) / 1_000.0
                         if stat.rtcp.rttUsec.n
                         else None,
+                        "jitter_buffer": {
+                            "current_frames": int(stat.jbuf.size),
+                            "prefetch_frames": int(stat.jbuf.prefetch),
+                            "minimum_delay_ms": int(stat.jbuf.minDelayMsec),
+                            "average_delay_ms": int(stat.jbuf.avgDelayMsec),
+                            "maximum_delay_ms": int(stat.jbuf.maxDelayMsec),
+                            "discarded_frames": int(stat.jbuf.discard),
+                        },
                     }
+                    with bridge.lock:
+                        session.observe_delivery_counters(delivery, now_ns)
                 except pj.Error:
                     pass
             if outcome is not None:
@@ -311,7 +418,8 @@ def run_live_call(
             if not bridge.remote_disconnected:
                 teardown_result = "hangup_unconfirmed"
         with bridge.lock:
-            session.set_delivery_counters(delivery)
+            if delivery:
+                session.observe_delivery_counters(delivery, time.monotonic_ns())
             session.finalize(
                 teardown_result=teardown_result,
                 now_ns=time.monotonic_ns(),
@@ -327,6 +435,12 @@ def run_live_call(
                         "sip_session_timer_s": 90,
                         "harness_call_cap_s": 60,
                     },
+                    "transport_binding": {
+                        "signaling_port": signaling_port,
+                        "signaling_port_range": signaling_port_range,
+                        "media_port": media_port,
+                        "media_port_range": media_port_range,
+                    },
                 },
             )
         # No libDestroy: pjsua2 teardown aborted both live attempts (a
@@ -334,3 +448,4 @@ def run_live_call(
         # the bounded destroyer). Artifacts are flushed, the BYE is out, and
         # the CLI hard-exits immediately after this returns, so the OS
         # reclaims the endpoint; SIP session timers bound the far end.
+        _LIVE_REFS.extend((ep, account, call, port, bridge))

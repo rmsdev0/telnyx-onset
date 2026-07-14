@@ -27,6 +27,12 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from onset.barge_in import BargeInHandler
+from onset.benchmark import (
+    SPEECH_BEARING_RULE_VERSION,
+    NullMilestoneSink,
+    interruption_source,
+    pcm16_rms_dbfs,
+)
 from onset.conversation import CallContext, Conversation
 from onset.limits import TokenBudget
 from onset.prompts import build_system_prompt
@@ -39,6 +45,7 @@ from onset.types import (
     LLMEvent,
     LLMEventType,
     LLMMessage,
+    MediaFlushResult,
     STTEvent,
     STTEventType,
     ToolCallRequest,
@@ -48,6 +55,7 @@ from onset.vad import VadDetector
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from onset.benchmark import FrozenRuntimeProfile, MilestoneSink
     from onset.ports import CallPort, LLMPort, MediaPort, SttPort, TtsPort, VadPort
     from onset.prompts import AgentConfig, FlowNode
     from onset.settings import Settings
@@ -87,6 +95,8 @@ class VoiceAgent:
         stt: SttPort | None = None,
         tts: TtsPort | None = None,
         vad: VadPort | None = None,
+        milestones: MilestoneSink | None = None,
+        benchmark_profile: FrozenRuntimeProfile | None = None,
     ) -> None:
         self._settings = settings
         self._call = call
@@ -104,6 +114,9 @@ class VoiceAgent:
         # down and hangs up rather than leaving the caller in dead air.
         self._degraded = False
         self._barge_in = BargeInHandler()
+        self._milestones = milestones if milestones is not None else NullMilestoneSink()
+        self._benchmark_profile = benchmark_profile
+        self._benchmark_mode = settings.benchmark_mode
 
         self._llm: LLMPort = TelnyxLLM(settings)
 
@@ -124,9 +137,12 @@ class VoiceAgent:
         # speak completion tracking. Each speak gets a monotonically increasing
         # generation carried in the mark name, so a stale mark echo (for a speak
         # we already interrupted) cannot complete a later one.
+        self._response_gen = 0
+        self._current_response_gen = -1
         self._speak_gen = 0
         self._current_speak_gen = -1
         self._speak_done = asyncio.Event()
+        self._cancellation_requested: set[int] = set()
 
         # Half-duplex listening gate (see handle_audio): while speaking, plus a
         # guard tail, the caller's frame is replaced with silence so echo cannot
@@ -135,6 +151,14 @@ class VoiceAgent:
         self._listen_guard_s = settings.listen_guard_ms / 1000.0
         self._mute_until = 0.0
         self._silence_frame = b"\x00" * settings.frame_bytes
+
+        # Benchmark observation state. The first speech-bearing application
+        # frame uses the frozen one-frame RMS rule; the harness stimulus remains
+        # independently timestamped on its own monotonic clock.
+        self._inbound_frame_index = 0
+        self._first_speech_frame_recorded = False
+        self._first_interim_recorded = False
+        self._first_final_recorded = False
 
         # Frames of decoded audio to buffer before playback starts, so an early
         # gap in the TTS delivery is absorbed pre-playback rather than starving
@@ -194,6 +218,8 @@ class VoiceAgent:
         """
         if self._closed:
             return
+        frame_index = self._inbound_frame_index
+        self._inbound_frame_index += 1
         if self._half_duplex:
             now = asyncio.get_running_loop().time()
             if self._barge_in.agent_is_speaking:
@@ -206,7 +232,33 @@ class VoiceAgent:
                 self._stt.feed(self._silence_frame)
                 return
         self._stt.feed(pcm16)
+        profile = self._benchmark_profile
+        if profile is not None and not self._first_speech_frame_recorded:
+            rms_dbfs = pcm16_rms_dbfs(pcm16)
+            if rms_dbfs >= profile.activity_threshold_dbfs:
+                self._first_speech_frame_recorded = True
+                self._milestones.record(
+                    "first_inbound_speech_bearing_frame",
+                    frame_index=frame_index,
+                    criterion_version=SPEECH_BEARING_RULE_VERSION,
+                    rms_dbfs=round(rms_dbfs, 3),
+                    threshold_dbfs=profile.activity_threshold_dbfs,
+                )
         if self._vad.process(pcm16):
+            self._milestones.record(
+                "vad_decision",
+                vad_aggressiveness=self._settings.vad_aggressiveness,
+                speech_onset_ms=self._settings.vad_speech_onset_ms,
+                silence_rearm_ms=self._settings.vad_silence_rearm_ms,
+                eligible_for_interruption=(
+                    interruption_source(
+                        self._benchmark_mode,
+                        STTEventType.SPEECH_STARTED.value,
+                        "",
+                    )
+                    is not None
+                ),
+            )
             self._events.put_nowait(STTEvent(STTEventType.SPEECH_STARTED))
 
     def submit_transcript(
@@ -217,6 +269,35 @@ class VoiceAgent:
         speech_final marks the end of the caller's utterance, so it is followed
         by an UtteranceEnd to close the turn; a plain final only accumulates.
         """
+        event_type = (
+            STTEventType.TRANSCRIPT_FINAL
+            if is_final or speech_final
+            else STTEventType.TRANSCRIPT_INTERIM
+        )
+        if transcript:
+            first = (
+                event_type == STTEventType.TRANSCRIPT_INTERIM
+                and not self._first_interim_recorded
+            ) or (
+                event_type == STTEventType.TRANSCRIPT_FINAL
+                and not self._first_final_recorded
+            )
+            if first:
+                if event_type == STTEventType.TRANSCRIPT_INTERIM:
+                    self._first_interim_recorded = True
+                else:
+                    self._first_final_recorded = True
+                self._milestones.record(
+                    f"first_{event_type.value}",
+                    non_empty=True,
+                    synthetic_metadata_only=True,
+                    eligible_for_interruption=(
+                        interruption_source(
+                            self._benchmark_mode, event_type.value, transcript
+                        )
+                        is not None
+                    ),
+                )
         if speech_final:
             if transcript:
                 self._events.put_nowait(
@@ -258,7 +339,8 @@ class VoiceAgent:
                 self._ending = True
 
             if self._config.greeting:
-                self._response_task = asyncio.create_task(self._greet())
+                generation = self._allocate_response_generation(caller_turn_id=None)
+                self._response_task = asyncio.create_task(self._greet(generation))
             elif self._ending:
                 with contextlib.suppress(Exception):
                     await self._call.hangup()
@@ -281,41 +363,82 @@ class VoiceAgent:
                 if self._ending:
                     continue
 
-                # Barge-in: a VAD onset (fastest) or any transcript while the
-                # agent is speaking. The stop action flushes the outbound media
-                # queue and clears Telnyx's buffer at the frame level.
-                is_barge_in_signal = event.type in (
+                is_observed_trigger_signal = event.type in (
                     STTEventType.SPEECH_STARTED,
                     STTEventType.TRANSCRIPT_INTERIM,
                     STTEventType.TRANSCRIPT_FINAL,
+                )
+                source = interruption_source(
+                    self._benchmark_mode, event.type.value, event.transcript
                 )
                 # In half-duplex the agent does not listen to itself, so a signal
                 # arriving mid-speech is a stale late-arriving transcript, never a
                 # live interruption; let the turn finish rather than flushing it.
                 if (
-                    is_barge_in_signal
+                    is_observed_trigger_signal
                     and self._barge_in.agent_is_speaking
                     and not self._half_duplex
                 ):
-                    await self._barge_in.handle_barge_in(self._media.flush)
-                    if self._response_task and not self._response_task.done():
-                        self._response_task.cancel()
-                    self._turn_manager.set_listening()
-                    continue
+                    if source is None:
+                        self._milestones.record(
+                            "ineligible_trigger_observed",
+                            generation=self._current_response_gen,
+                            source=event.type.value,
+                        )
+                    else:
+                        generation = self._current_response_gen
+                        self._milestones.record(
+                            "interruption_requested",
+                            generation=generation,
+                            source=source,
+                        )
+                        flush_result: MediaFlushResult | None = None
+
+                        async def stop_playback() -> None:
+                            nonlocal flush_result
+                            flush_result = await self._media.flush()
+
+                        await self._barge_in.handle_barge_in(stop_playback)
+                        if flush_result is not None:
+                            self._record_flush(generation, flush_result)
+                        self._request_response_cancellation(generation)
+                    # Do not discard the signal that caused interruption. VAD is
+                    # inert to turn assembly; transcript events continue below so
+                    # the caller utterance remains exactly-once eligible.
+                if source is not None and self._barge_in.agent_is_speaking:
+                    # A source can only get here in half duplex, where late STT
+                    # is deliberately non-interrupting.
+                    self._milestones.record(
+                        "ineligible_trigger_observed",
+                        generation=self._current_response_gen,
+                        source=event.type.value,
+                        reason="half_duplex_gate",
+                    )
 
                 user_turn = self._turn_manager.handle_event(event)
                 if user_turn:
-                    # A newly completed turn supersedes any response still in
-                    # flight. Cancel and reap it first so only one response runs
-                    # at a time; overlapping responses would corrupt the shared
-                    # speak-completion state and wedge agent_is_speaking on.
+                    turn_id = self._turn_manager.last_completed_turn_id
+                    self._milestones.record(
+                        "caller_turn_completed",
+                        turn_id=turn_id,
+                        source_event_count=(
+                            self._turn_manager.last_completed_source_event_count
+                        ),
+                    )
                     if self._response_task and not self._response_task.done():
                         log.info("agent.superseding_response")
-                        self._response_task.cancel()
+                        self._request_response_cancellation(
+                            self._current_response_gen, reason="superseded"
+                        )
                         with contextlib.suppress(Exception):
                             await self._response_task
                     self._conversation.add_user_turn(user_turn)
-                    self._response_task = asyncio.create_task(self._generate_response())
+                    generation = self._allocate_response_generation(
+                        caller_turn_id=turn_id
+                    )
+                    self._response_task = asyncio.create_task(
+                        self._generate_response(generation)
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -358,6 +481,54 @@ class VoiceAgent:
         if generation == self._current_speak_gen:
             self._speak_done.set()
 
+    def _allocate_response_generation(self, caller_turn_id: int | None) -> int:
+        """Create the sole ownership id for LLM, TTS, media, and teardown."""
+        self._response_gen += 1
+        generation = self._response_gen
+        self._current_response_gen = generation
+        self._milestones.record(
+            "next_response_started",
+            generation=generation,
+            caller_turn_id=caller_turn_id,
+        )
+        return generation
+
+    def _request_response_cancellation(
+        self, generation: int, *, reason: str = "interruption"
+    ) -> None:
+        """Request cancellation at most once for a response generation."""
+        task = self._response_task
+        if generation in self._cancellation_requested or task is None or task.done():
+            return
+        self._cancellation_requested.add(generation)
+        self._milestones.record(
+            "response_cancellation_requested",
+            generation=generation,
+            reason=reason,
+        )
+        task.cancel()
+
+    def _record_flush(self, generation: int, result: MediaFlushResult) -> None:
+        self._milestones.record(
+            "local_media_epoch_invalidated",
+            monotonic_ns=result.invalidated_ns,
+            generation=generation,
+            old_epoch=result.old_epoch,
+            new_epoch=result.new_epoch,
+        )
+        self._milestones.record(
+            "clear_send_started",
+            monotonic_ns=result.send_started_ns,
+            generation=generation,
+        )
+        self._milestones.record(
+            "clear_send_finished",
+            monotonic_ns=result.send_finished_ns,
+            generation=generation,
+            outcome=result.outcome,
+            error_category=result.error_category,
+        )
+
     # ── Response generation ──────────────────────────────────────
 
     def _build_tools_schemas(self) -> list[dict[str, Any]] | None:
@@ -371,7 +542,7 @@ class VoiceAgent:
             schemas = list(self._config.tools.get_schemas())
         return schemas or None
 
-    async def _generate_response(self) -> None:
+    async def _generate_response(self, generation: int) -> None:
         """Run the LLM, the tool loop, then speak the reply for one turn."""
         t_start = time.monotonic()
 
@@ -380,6 +551,11 @@ class VoiceAgent:
             if self._budget_announced:
                 log.warning(
                     "agent.turn_skipped_budget_exhausted", used=self._budget.used
+                )
+                self._milestones.record(
+                    "response_teardown_completed",
+                    generation=generation,
+                    outcome="skipped_budget_exhausted",
                 )
                 return
             self._budget_announced = True
@@ -403,7 +579,7 @@ class VoiceAgent:
         try:
             if budget_message is not None:
                 full_text = budget_message
-                await self._speak([full_text], spoken_tokens)
+                await self._speak([full_text], spoken_tokens, generation)
                 return
 
             # Charge the prompt and starting history to the budget once; the
@@ -419,7 +595,7 @@ class VoiceAgent:
                     self._budget_announced = True
                     log.warning("agent.token_budget_exhausted", used=self._budget.used)
                     full_text = self._config.budget_exceeded_message
-                    await self._speak([full_text], spoken_tokens)
+                    await self._speak([full_text], spoken_tokens, generation)
                     break
 
                 text_tokens: list[str] = []
@@ -459,7 +635,7 @@ class VoiceAgent:
                             max_rounds=self._config.max_tool_rounds,
                         )
                         full_text = self._config.fallback_message
-                        await self._speak([full_text], spoken_tokens)
+                        await self._speak([full_text], spoken_tokens, generation)
                         break
 
                     self._conversation.add_assistant_turn("", tool_calls=tool_calls)
@@ -499,7 +675,7 @@ class VoiceAgent:
 
                 full_text = "".join(text_tokens)
                 if full_text.strip():
-                    await self._speak(text_tokens, spoken_tokens)
+                    await self._speak(text_tokens, spoken_tokens, generation)
 
                 break  # Done with this turn
 
@@ -507,7 +683,7 @@ class VoiceAgent:
             log.info("agent.response_cancelled")
         except Exception:
             log.exception("agent.response_failed")
-            full_text = await self._speak_fallback(spoken_tokens)
+            full_text = await self._speak_fallback(spoken_tokens, generation)
         finally:
             interrupted = self._barge_in.was_interrupted
             if interrupted:
@@ -517,7 +693,9 @@ class VoiceAgent:
             elif full_text:
                 self._conversation.add_assistant_turn(full_text)
             self._barge_in.agent_is_speaking = False
-            self._turn_manager.set_listening()
+            self._milestones.record(
+                "response_teardown_completed", generation=generation
+            )
 
             total_ms = round((time.monotonic() - t_start) * 1000)
             log.info("latency.total", ms=total_ms, interrupted=interrupted)
@@ -526,22 +704,29 @@ class VoiceAgent:
                 with contextlib.suppress(Exception):
                     await self._call.hangup()
 
-    async def _greet(self) -> None:
+    async def _greet(self, generation: int) -> None:
         """Speak the configured greeting when the call connects."""
         spoken_tokens: list[str] = []
         try:
-            await self._speak([self._config.greeting], spoken_tokens)
+            await self._speak([self._config.greeting], spoken_tokens, generation)
         except asyncio.CancelledError:
             log.info("agent.greeting_cancelled")
         finally:
             _ = self._barge_in.was_interrupted
             self._barge_in.agent_is_speaking = False
-            self._turn_manager.set_listening()
+            self._milestones.record(
+                "response_teardown_completed", generation=generation
+            )
             if self._ending:
                 with contextlib.suppress(Exception):
                     await self._call.hangup()
 
-    async def _speak(self, text_tokens: list[str], spoken_tokens: list[str]) -> None:
+    async def _speak(
+        self,
+        text_tokens: list[str],
+        spoken_tokens: list[str],
+        generation: int,
+    ) -> None:
         """Synthesize text on the TTS socket and pace it into the call.
 
         spoken_tokens is appended only after all of this turn's frames are
@@ -557,8 +742,8 @@ class VoiceAgent:
             return
 
         self._speak_gen += 1
-        generation = self._speak_gen
-        self._current_speak_gen = generation
+        speak_generation = self._speak_gen
+        self._current_speak_gen = speak_generation
         self._speak_done = asyncio.Event()
 
         t_speak = time.monotonic()
@@ -600,22 +785,35 @@ class VoiceAgent:
         spoken_tokens.extend(text_tokens)
         # Fence the end of this utterance; Telnyx echoes the mark once the audio
         # ahead of it has finished playing, which is our playback-complete signal.
-        await self._media.send_mark(epoch, f"speak:{generation}")
+        await self._media.send_mark(epoch, f"speak:{speak_generation}")
         log.info(
-            "speak.injected", generation=generation, frames=frames, chars=len(text)
+            "speak.injected",
+            generation=generation,
+            speak_generation=speak_generation,
+            frames=frames,
+            chars=len(text),
         )
 
         timeout = max(15.0, len(text) / 10 + 10.0)
         try:
             await asyncio.wait_for(self._speak_done.wait(), timeout)
         except TimeoutError:
-            log.warning("speak.timeout", generation=generation, chars=len(text))
+            log.warning(
+                "speak.timeout",
+                generation=generation,
+                speak_generation=speak_generation,
+                chars=len(text),
+            )
         log.info("latency.speak_total", ms=round((time.monotonic() - t_speak) * 1000))
 
-    async def _speak_fallback(self, spoken_tokens: list[str]) -> str:
+    async def _speak_fallback(
+        self, spoken_tokens: list[str], generation: int
+    ) -> str:
         """Best-effort spoken apology after a pipeline failure."""
         try:
-            await self._speak([self._config.fallback_message], spoken_tokens)
+            await self._speak(
+                [self._config.fallback_message], spoken_tokens, generation
+            )
         except Exception:
             log.exception("agent.fallback_speech_failed")
         return "".join(spoken_tokens).strip()

@@ -47,6 +47,7 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "TC"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+exclude = ["^bench/artifacts/"]
 
 [[tool.mypy.overrides]]
 module = ["webrtcvad", "miniaudio", "pjsua2"]
