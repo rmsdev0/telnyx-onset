@@ -1,0 +1,29 @@
+{
+  "condition_median_difference_ms": 640.2,
+  "created_utc": "2026-07-14T19:55:45.909259+00:00",
+  "final_session_sha256": "db53852068a58d6787c308d4cad9da5bf64cacb4a819800cf92e9a30f3745b3a",
+  "pair_delta_label": "639.9 ms",
+  "pair_delta_ms": 639.8668759999999,
+  "purpose": "provenance for docs/assets/phase3-pair-*.png",
+  "renderer_commit": "01d899da1c4e5f84364349be8bcf91a710dbb903",
+  "runtime_commit": "241e77cd5a756bb8139f9fe631bb0b509b4c7cb8",
+  "selection_note": "Nearest-median clean trials; the strictly nearest transcript trial p3f-071 was passed over because that pair's difference (640.199 ms) rounds to the condition medians' difference and the pair label must not read 640.2 ms.",
+  "source_manifest_sha256": "00de386e87a03d3835a047f40f1f88594d8bb5b5b6b4b127f36251d319ce0dbb",
+  "successful_trials": 60,
+  "trials": {
+    "onset-fd-transcript": {
+      "captured_utc": "2026-07-13T17:28:06.159163+00:00",
+      "condition_median_ms": 1040.9,
+      "harness_boundary_latency_ms": 1040.686084,
+      "run_id": "p2-ff108cb653122c13",
+      "trial_id": "p3f-019"
+    },
+    "onset-fd-vad": {
+      "captured_utc": "2026-07-13T17:35:57.814723+00:00",
+      "condition_median_ms": 400.7,
+      "harness_boundary_latency_ms": 400.819208,
+      "run_id": "p2-2ae8c01cc3b72d24",
+      "trial_id": "p3f-032"
+    }
+  }
+}
