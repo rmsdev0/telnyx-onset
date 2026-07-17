@@ -17,7 +17,8 @@ async def test_check_availability_closed_on_monday() -> None:
         '{"date": "Monday", "time": "7 PM", "party_size": 2}',
         call_context=CallContext(),
     )
-    assert result == "Sorry, the restaurant is closed on Mondays."
+    assert result.succeeded
+    assert result.content == "Sorry, the restaurant is closed on Mondays."
 
 
 @pytest.mark.asyncio
@@ -27,7 +28,8 @@ async def test_check_availability_party_too_large() -> None:
         '{"date": "Friday", "time": "7 PM", "party_size": 9}',
         call_context=CallContext(),
     )
-    assert "cannot seat parties larger than 8" in result
+    assert result.succeeded
+    assert "cannot seat parties larger than 8" in result.content
 
 
 @pytest.mark.asyncio
@@ -38,7 +40,8 @@ async def test_check_availability_stores_slots() -> None:
         '{"date": "Friday", "time": "7 PM", "party_size": 4}',
         call_context=ctx,
     )
-    assert result == "A table for 4 is available on Friday at 7 PM."
+    assert result.succeeded
+    assert result.content == "A table for 4 is available on Friday at 7 PM."
     assert ctx.slots == {"date": "Friday", "time": "7 PM", "party_size": 4}
 
 
@@ -52,28 +55,46 @@ async def test_make_reservation_is_deterministic() -> None:
         "make_reservation", '{"name": "Alex"}', call_context=ctx
     )
     expected_number = zlib.crc32(b"Alex") % 10000
-    assert f"GF-{expected_number:04d}" in first
+    assert first.succeeded
+    assert second.succeeded
+    assert f"GF-{expected_number:04d}" in first.content
     assert first == second  # stable across runs, unlike builtin hash()
-    assert "party of 4 on Friday at 7 PM" in first
+    assert "party of 4 on Friday at 7 PM" in first.content
+
+
+@pytest.mark.asyncio
+async def test_make_reservation_rejects_blank_name_without_mutating_context() -> None:
+    ctx = CallContext(slots={"date": "Friday", "time": "7 PM", "party_size": 4})
+
+    result = await restaurant_tools.execute(
+        "make_reservation", '{"name": "   "}', call_context=ctx
+    )
+
+    assert not result.succeeded
+    assert result.content.startswith("Error: a non-empty caller name is required")
+    assert ctx.slots == {"date": "Friday", "time": "7 PM", "party_size": 4}
 
 
 @pytest.mark.asyncio
 async def test_get_menu() -> None:
     result = await restaurant_tools.execute("get_menu", "{}")
-    assert "Pan-seared salmon" in result
-    assert "Truffle mushroom risotto" in result
+    assert result.succeeded
+    assert "Pan-seared salmon" in result.content
+    assert "Truffle mushroom risotto" in result.content
 
 
 @pytest.mark.asyncio
 async def test_unknown_tool_returns_error_string() -> None:
     result = await restaurant_tools.execute("not_a_tool", "{}")
-    assert result.startswith("Error: unknown tool")
+    assert not result.succeeded
+    assert result.content.startswith("Error: unknown tool")
 
 
 @pytest.mark.asyncio
 async def test_invalid_json_returns_error_string() -> None:
     result = await restaurant_tools.execute("get_menu", "{not json")
-    assert result.startswith("Error: invalid arguments JSON")
+    assert not result.succeeded
+    assert result.content.startswith("Error: invalid arguments JSON")
 
 
 def test_schema_shape() -> None:

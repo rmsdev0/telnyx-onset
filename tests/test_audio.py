@@ -46,8 +46,9 @@ def test_queue_source_reads_chunks_then_eof() -> None:
     for item in (b"MP3PART1", b"MP3PART2", None):
         q.put(item)
     src = QueueStreamSource(q)
-    assert src.read(4096) == b"MP3PART1"
-    assert src.read(4096) == b"MP3PART2"
+    # A request larger than each provider chunk must receive their combined EOF
+    # tail, not return the first short chunk and accidentally terminate decode.
+    assert src.read(4096) == b"MP3PART1MP3PART2"
     # Empty return marks end-of-stream to miniaudio.
     assert src.read(4096) == b""
     assert src.read(4096) == b""
@@ -58,8 +59,19 @@ def test_queue_source_returns_partial_within_a_chunk() -> None:
     q.put(b"ABCDEF")
     q.put(None)
     src = QueueStreamSource(q)
-    # A short read is fine (miniaudio asks again); the remainder is held.
     assert src.read(2) == b"AB"
     assert src.read(2) == b"CD"
+    # A short read is allowed only for the final tail after genuine EOF.
     assert src.read(10) == b"EF"
     assert src.read(10) == b""
+
+
+def test_queue_source_combines_short_provider_chunks_to_fill_read() -> None:
+    q: queue.Queue[bytes | None] = queue.Queue()
+    for item in (b"A", b"BC", b"DEFG", None):
+        q.put(item)
+    src = QueueStreamSource(q)
+
+    assert src.read(4) == b"ABCD"
+    assert src.read(4) == b"EFG"
+    assert src.read(4) == b""

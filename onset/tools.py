@@ -51,6 +51,14 @@ class ToolDef:
     parameters: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class ToolResult:
+    """A tool's LLM-visible content plus whether flow transitions may run."""
+
+    content: str
+    succeeded: bool
+
+
 class ToolRegistry:
     """Registry of tools available to the voice agent."""
 
@@ -126,23 +134,28 @@ class ToolRegistry:
             if schema["function"]["name"] in names
         ]
 
-    async def execute(self, name: str, arguments_json: str, **extra_kwargs: Any) -> str:
-        """Execute a tool by name and return its string result.
+    async def execute(
+        self, name: str, arguments_json: str, **extra_kwargs: Any
+    ) -> ToolResult:
+        """Execute a tool and report content separately from transition success.
 
         Arguments are passed as a JSON string (as received from the LLM).
         Extra kwargs (for example call_context) are passed if the function
-        accepts them. Errors are returned as strings rather than raised.
+        accepts them. Errors are returned to the LLM with succeeded=False so a
+        failed invocation cannot advance the conversation flow.
         """
         tool_def = self._tools.get(name)
         if not tool_def:
             log.warning("tools.unknown", name=name)
-            return f"Error: unknown tool '{name}'"
+            return ToolResult(f"Error: unknown tool '{name}'", succeeded=False)
 
         try:
             kwargs = json.loads(arguments_json)
         except json.JSONDecodeError as e:
             log.warning("tools.invalid_json", name=name, error=str(e))
-            return f"Error: invalid arguments JSON: {e}"
+            return ToolResult(
+                f"Error: invalid arguments JSON: {e}", succeeded=False
+            )
 
         # Pass call_context if the function accepts it
         sig = inspect.signature(tool_def.func)
@@ -155,10 +168,12 @@ class ToolRegistry:
             result = tool_def.func(**kwargs)
             if asyncio.iscoroutine(result):
                 result = await result
-            return str(result)
+            if isinstance(result, ToolResult):
+                return result
+            return ToolResult(str(result), succeeded=True)
         except Exception as e:
             log.exception("tools.error", name=name)
-            return f"Error executing {name}: {e}"
+            return ToolResult(f"Error executing {name}: {e}", succeeded=False)
 
 
 # ── Golden Fork restaurant demo tools ────────────────────────────
@@ -193,9 +208,17 @@ async def check_availability(
 
 
 @restaurant_tools.tool(
-    description="Confirm and make a reservation with the caller's name"
+    description="Confirm and make a reservation with the caller's non-empty name"
 )
-async def make_reservation(name: str, call_context: CallContext | None = None) -> str:
+async def make_reservation(
+    name: str, call_context: CallContext | None = None
+) -> str | ToolResult:
+    name = name.strip()
+    if not name:
+        return ToolResult(
+            "Error: a non-empty caller name is required before making the reservation.",
+            succeeded=False,
+        )
     if call_context:
         call_context.slots["name"] = name
         date = call_context.slots.get("date", "the requested date")
