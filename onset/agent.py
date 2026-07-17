@@ -648,15 +648,23 @@ class VoiceAgent:
                     answered: set[str] = set()
                     try:
                         for tc in tool_calls:
-                            result = await self._config.tools.execute(
+                            outcome = await self._config.tools.execute(
                                 tc.name,
                                 tc.arguments,
                                 call_context=self._context,
                             )
+                            result = outcome.content
                             self._conversation.add_tool_result(tc.id, result)
                             self._budget.record_text(result)
                             answered.add(tc.id)
-                            self._handle_transition(tc.name)
+                            if outcome.succeeded:
+                                self._handle_transition(tc.name)
+                            else:
+                                log.info(
+                                    "flow.transition_skipped",
+                                    node=self._context.current_node,
+                                    trigger=tc.name,
+                                )
                     finally:
                         for tc in tool_calls:
                             if tc.id not in answered:

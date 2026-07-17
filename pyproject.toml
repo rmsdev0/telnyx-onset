@@ -50,7 +50,7 @@ strict = true
 exclude = ["^bench/artifacts/"]
 
 [[tool.mypy.overrides]]
-module = ["webrtcvad", "miniaudio", "pjsua2"]
+module = ["webrtcvad", "miniaudio", "pjsua2", "PIL", "PIL.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 

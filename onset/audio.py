@@ -120,11 +120,10 @@ class QueueStreamSource(miniaudio.StreamableSource):  # type: ignore[misc]
     """A miniaudio streaming source fed encoded bytes through a thread-safe queue.
 
     The async WS recv loop puts MP3 chunks on the queue (and None to mark the end
-    of the stream); the decoder thread pulls through read(). read() blocks while
-    the queue is empty and the stream is not finished, because miniaudio treats a
-    short read as success (it asks again) but an empty return as end-of-stream, so
-    returning b"" early would truncate the audio. Partial reads are fine, so the
-    decoder advances as soon as the first chunk lands.
+    of the stream); the decoder thread pulls through read(). miniaudio's MP3 read
+    callback treats a short read as end-of-stream, so read() must accumulate and
+    block until it can return exactly the requested byte count. The only valid
+    short read is the final tail after the real EOF sentinel.
     """
 
     def __init__(self, feed: queue.Queue[bytes | None]) -> None:
@@ -133,7 +132,7 @@ class QueueStreamSource(miniaudio.StreamableSource):  # type: ignore[misc]
         self._eof = False
 
     def read(self, num_bytes: int) -> bytes:
-        while not self._buf and not self._eof:
+        while len(self._buf) < num_bytes and not self._eof:
             item = self._feed.get()
             if item is None:
                 self._eof = True

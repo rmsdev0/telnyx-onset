@@ -121,6 +121,42 @@ async def test_full_reservation_flow(settings: Settings) -> None:
 
 
 @pytest.mark.asyncio
+async def test_blank_reservation_name_does_not_transition_or_hang_up(
+    settings: Settings,
+) -> None:
+    h = make_harness(
+        settings,
+        rounds=[
+            tool_round(
+                "c1",
+                "check_availability",
+                {"date": "Friday", "time": "7 PM", "party_size": 4},
+            ),
+            tool_round("c2", "make_reservation", {"name": ""}),
+            text_round("I still need a name for the reservation."),
+            tool_round("c3", "make_reservation", {"name": "Alex"}),
+            text_round("You're all set, Alex. See you Friday. Goodbye!"),
+        ],
+    )
+    h.agent.start()
+    await until(lambda: bool(h.tts.texts) and not h.agent._barge_in.agent_is_speaking)
+
+    submit_turn(h.agent, "Book Friday at 7 PM for four people.")
+    await until(lambda: "I still need a name" in " ".join(h.tts.texts))
+    assert h.agent._context.current_node == "confirm"
+    assert "name" not in h.agent._context.slots
+    assert not h.call.hung_up
+
+    submit_turn(h.agent, "The name is Alex.")
+    await until(lambda: h.agent._context.current_node == "farewell")
+    await until(lambda: h.call.hung_up)
+    assert h.agent._context.slots["name"] == "Alex"
+
+    h.agent.submit_hangup()
+    await asyncio.wait_for(_run(h), timeout=2.0)
+
+
+@pytest.mark.asyncio
 async def test_prebuffer_preserves_all_frames() -> None:
     # Prebuffer smaller than the reply so both the prebuffer collection and the
     # streaming remainder run; every synthesized frame must still reach the media
